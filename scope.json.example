@@ -1,0 +1,364 @@
+{
+  "name": "comprehensive_pentest_scope",
+  "description": "Comprehensive penetration testing scope configuration with all modern features",
+  
+  "targets": {
+    "allowed_domains": ["example.com", "api.example.com", "admin.example.com"],
+    "include_subdomains": true,
+    "subdomain_depth": 3,
+    "allowed_cidrs": ["192.168.1.0/24", "10.0.0.0/16"],
+    "allowed_ips": ["192.168.1.100", "203.0.113.50"],
+    "allowed_urls": ["https://example.com", "https://api.example.com/v1"],
+    "url_patterns": ["^https://api\\.example\\.com/v[0-9]+/.*"],
+    "allowed_files": ["/path/to/local/file.txt", "/opt/targets/wordlists"],
+    "asn_ranges": ["AS64496", "AS13335"],
+    "cloud_identifiers": {
+      "aws": {
+        "account_ids": ["123456789012"],
+        "regions": ["us-east-1", "us-west-2"],
+        "s3_buckets": ["my-public-bucket", "my-data-bucket"],
+        "cloudfront_distributions": ["E1234ABCD5678"]
+      },
+      "azure": {
+        "subscription_ids": ["xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"],
+        "resource_groups": ["production-rg", "staging-rg"]
+      },
+      "gcp": {
+        "project_ids": ["my-gcp-project"],
+        "zones": ["us-central1-a", "us-west1-b"]
+      }
+    }
+  },
+  
+  "network": {
+    "ports": {
+      "tcp": [80, 443, 8080, 8443, 3000, 3306, 5432, 6379, 27017],
+      "udp": [53, 161, 389],
+      "excluded_ports": [25, 465, 587],
+      "port_ranges": [[1, 1024], [8000, 9000]]
+    },
+    "protocols": ["http", "https", "ftp", "ssh", "smb", "rdp", "telnet", "vnc"],
+    "require_https_only": false,
+    "follow_redirects": true,
+    "max_redirect_depth": 5
+  },
+  
+  "paths": {
+    "included_paths": ["/api/", "/admin/", "/user/", "/dashboard/"],
+    "excluded_paths": ["/logout", "/signout", "/delete", "/remove", "/destroy"],
+    "path_patterns": {
+      "include": ["^/api/v[0-9]+/.*", "^/admin/.*"],
+      "exclude": ["^/auth/logout.*", "^.*/delete/.*", "^.*/remove/.*"]
+    },
+    "file_extensions": {
+      "include": [".php", ".asp", ".aspx", ".jsp", ".do", ".action", ".json", ".xml"],
+      "exclude": [".jpg", ".jpeg", ".png", ".gif", ".css", ".ico", ".svg", ".woff"]
+    },
+    "max_crawl_depth": 10,
+    "max_pages_per_domain": 1000
+  },
+  
+  "authentication": {
+    "test_unauthenticated": true,
+    "test_authenticated": true,
+    "credentials": [
+      {"username": "testuser", "password": "testpass123", "type": "form"},
+      {"username": "admin", "password": "adminpass456", "type": "basic"}
+    ],
+    "tokens": [
+      "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+      "ApiKey: your_api_key_here"
+    ],
+    "auth_endpoints": [
+      "https://example.com/auth/login",
+      "https://api.example.com/v1/authenticate"
+    ],
+    "maintain_session": true,
+    "session_timeout": 3600,
+    "privilege_levels": ["guest", "user", "moderator", "admin", "superadmin"]
+  },
+  
+  "testing_limits": {
+    "max_requests_per_second": 10,
+    "max_concurrent_connections": 50,
+    "max_tool_calls": 500,
+    "request_timeout": 30,
+    "max_payload_size": 10485760,
+    "throttle_on_error": true,
+    "backoff_strategy": "exponential",
+    "time_windows": {
+      "allowed_hours": [[9, 17]],
+      "timezone": "UTC",
+      "blackout_dates": ["2024-12-25", "2024-01-01"]
+    },
+    "resource_limits": {
+      "max_memory_mb": 4096,
+      "max_cpu_percent": 80,
+      "max_disk_io_mbps": 100
+    }
+  },
+  
+  "vulnerability_testing": {
+    "categories": {
+      "injection": true,
+      "sql_injection": true,
+      "nosql_injection": true,
+      "ldap_injection": true,
+      "xpath_injection": true,
+      "command_injection": true,
+      "broken_authentication": true,
+      "sensitive_data_exposure": true,
+      "xxe": true,
+      "broken_access_control": true,
+      "security_misconfiguration": true,
+      "xss": true,
+      "reflected_xss": true,
+      "stored_xss": true,
+      "dom_xss": true,
+      "insecure_deserialization": true,
+      "known_vulnerabilities": true,
+      "insufficient_logging": true,
+      "ssrf": true,
+      "idor": true,
+      "csrf": true,
+      "cors_misconfiguration": true,
+      "api_abuse": true,
+      "business_logic_flaws": true,
+      "file_upload_vulnerabilities": true,
+      "path_traversal": true,
+      "open_redirect": true,
+      "clickjacking": true,
+      "race_conditions": true
+    },
+    "severity_threshold": "low",
+    "active_exploitation": false,
+    "proof_of_concept_only": true,
+    "safe_mode": true,
+    "specific_cves": ["CVE-2021-44228", "CVE-2021-3156"],
+    "skip_cves": ["CVE-2020-0001"]
+  },
+  
+  "exclusions": {
+    "domains": ["payments.example.com", "mail.example.com", "email.example.com"],
+    "ip_addresses": ["192.168.1.1", "10.0.0.1"],
+    "url_patterns": [".*\\/production\\/.*", ".*\\/prod\\/.*"],
+    "keywords": ["production", "prod", "live", "payment", "checkout", "billing"],
+    "sensitive_parameters": [
+      "password", "passwd", "pwd", "pass",
+      "secret", "token", "api_key", "apikey",
+      "access_token", "refresh_token",
+      "credit_card", "cc", "cvv",
+      "ssn", "social_security"
+    ],
+    "http_methods": [],
+    "user_agents_blocked": ["block-this-agent"],
+    "forbidden_payloads": [
+      "DROP TABLE",
+      "DELETE FROM",
+      "../../../etc/passwd",
+      "<?php system($_GET['cmd']); ?>",
+      "<script>alert('xss')</script>",
+      "'; DROP DATABASE --"
+    ]
+  },
+  
+  "data_handling": {
+    "pii_protection": {
+      "enabled": true,
+      "scrub_from_logs": true,
+      "scrub_patterns": [
+        "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+        "\\b\\d{16}\\b",
+        "\\b[\\w\\.-]+@[\\w\\.-]+\\.\\w+\\b"
+      ]
+    },
+    "report_generation": {
+      "include_request_response": true,
+      "include_screenshots": true,
+      "include_proof_of_concept": true,
+      "redact_sensitive_data": true,
+      "output_formats": ["json", "html", "pdf", "markdown"]
+    },
+    "data_retention": {
+      "keep_scan_data_days": 30,
+      "keep_reports_days": 90,
+      "auto_delete": true
+    }
+  },
+  
+  "compliance": {
+    "authorization": {
+      "written_permission": true,
+      "permission_document_id": "PENTEST-2024-001",
+      "authorized_by": "CISO John Doe",
+      "authorization_date": "2024-06-01",
+      "expiration_date": "2024-12-31"
+    },
+    "standards": {
+      "owasp_top_10": true,
+      "owasp_api_top_10": true,
+      "sans_top_25": true,
+      "pci_dss": false,
+      "hipaa": false,
+      "gdpr": true,
+      "iso_27001": false,
+      "nist_csf": true
+    },
+    "legal_constraints": {
+      "country_restrictions": [],
+      "law_enforcement_notification": false,
+      "third_party_consent_required": false
+    },
+    "terms_of_service": {
+      "respect_robots_txt": true,
+      "respect_security_txt": true,
+      "honor_rate_limits": true,
+      "stop_on_ban": true
+    }
+  },
+  
+  "reconnaissance": {
+    "passive_only": false,
+    "osint_sources": {
+      "search_engines": true,
+      "google_dorking": true,
+      "social_media": true,
+      "linkedin": true,
+      "twitter": true,
+      "pastebin": true,
+      "github": true,
+      "gitlab": true,
+      "certificate_transparency": true,
+      "dns_records": true,
+      "whois": true,
+      "wayback_machine": true,
+      "shodan": true,
+      "censys": true,
+      "hunter_io": true
+    },
+    "subdomain_enumeration": {
+      "enabled": true,
+      "bruteforce": true,
+      "dns_bruteforce_wordlist_size": 10000,
+      "permutation_scanning": true,
+      "certificate_transparency": true,
+      "max_subdomains": 1000
+    },
+    "technology_fingerprinting": {
+      "enabled": true,
+      "identify_cms": true,
+      "identify_frameworks": true,
+      "identify_web_server": true,
+      "identify_cdn": true,
+      "identify_waf": true,
+      "identify_load_balancer": true,
+      "version_detection": true,
+      "header_analysis": true
+    }
+  },
+  
+  "advanced": {
+    "proxy_configuration": {
+      "use_proxy": false,
+      "proxy_url": "http://127.0.0.1:8080",
+      "proxy_rotation": false,
+      "proxy_pool": ["http://proxy1:8080", "http://proxy2:8080"]
+    },
+    "tor_configuration": {
+      "use_tor": false,
+      "tor_socks_port": 9050,
+      "tor_control_port": 9051,
+      "circuit_renewal_minutes": 10
+    },
+    "evasion_techniques": {
+      "randomize_user_agent": true,
+      "randomize_request_order": true,
+      "time_randomization": true,
+      "jitter_delay_ms": [100, 500],
+      "header_randomization": true,
+      "encoding_techniques": ["url", "double_url", "unicode", "hex"],
+      "fragmentation": false,
+      "case_manipulation": true
+    },
+    "custom_headers": {
+      "X-Custom-Header": "value",
+      "X-Forwarded-For": "127.0.0.1"
+    },
+    "webhook_notifications": {
+      "enabled": false,
+      "on_finding": ["https://webhook.site/your-uuid"],
+      "on_completion": ["https://webhook.site/your-uuid"],
+      "on_error": ["https://webhook.site/your-uuid"],
+      "on_critical": ["https://webhook.site/your-uuid"]
+    }
+  },
+  
+  "tools_configuration": {
+    "nmap": {
+      "enabled": true,
+      "scan_type": "comprehensive",
+      "timing_template": "T4",
+      "script_scan": true,
+      "version_detection": true,
+      "os_detection": true
+    },
+    "nuclei": {
+      "enabled": true,
+      "severity": ["critical", "high", "medium", "low"],
+      "templates": ["cves", "vulnerabilities", "misconfigurations"],
+      "rate_limit": 150
+    },
+    "sqlmap": {
+      "enabled": true,
+      "risk_level": 1,
+      "verbosity": 1,
+      "threads": 5,
+      "batch_mode": true
+    },
+    "burp_suite": {
+      "enabled": true,
+      "active_scan": false,
+      "passive_scan": true,
+      "spider": true
+    },
+    "zap": {
+      "enabled": true,
+      "active_scan": false,
+      "passive_scan": true,
+      "ajax_spider": true
+    },
+    "gobuster": {
+      "enabled": true,
+      "wordlist": "/usr/share/wordlists/dirb/common.txt",
+      "threads": 50,
+      "extensions": ["php", "html", "js", "txt", "json"]
+    },
+    "ffuf": {
+      "enabled": true,
+      "threads": 40,
+      "rate_limit": 0,
+      "recursion": true,
+      "recursion_depth": 2
+    },
+    "wpscan": {
+      "enabled": true,
+      "enumerate": ["vp", "vt", "tt", "cb", "dbe", "u", "m"],
+      "plugins_detection": "aggressive"
+    }
+  },
+  
+  "metadata": {
+    "engagement_name": "Example Corp Penetration Test Q2 2024",
+    "engagement_id": "PENTEST-2024-Q2-001",
+    "engagement_type": "external_blackbox",
+    "tester_name": "Red Team Alpha",
+    "tester_email": "redteam@example.com",
+    "client_name": "Example Corporation",
+    "client_contact": "security@example.com",
+    "start_date": "2024-06-01",
+    "end_date": "2024-06-30",
+    "notes": "Comprehensive external penetration test including web apps, APIs, and network infrastructure",
+    "tags": ["web", "api", "network", "external", "blackbox"],
+    "report_recipients": ["ciso@example.com", "security-team@example.com"]
+  }
+}

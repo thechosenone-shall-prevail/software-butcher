@@ -1,0 +1,639 @@
+from __future__ import annotations
+
+from typing import Any
+from urllib.parse import urljoin, urlsplit
+
+from ...core.adapter import AdapterCapability, AdapterRequest, AdapterResult
+from ...core.asset_classifier import classify_url_asset_type
+from ...state.session_state import get_origin
+from ...core.registry import DEFAULT_REGISTRY
+from ...core.runner import SafeRunner
+from .client import DEFAULT_HEXSTRIKE_SERVER, HexstrikeApiClient, HexstrikeServerUnavailableError
+from .interpreter import HexStrikeInterpreter
+import shlex
+
+DISCOVERY_INTENTS = frozenset(
+    {
+        "fingerprint",
+        "continue_discovery",
+        "discover",
+        "enrich",
+        "authenticated_discovery",
+    }
+)
+
+SELECT_TOOLS_OBJECTIVES = frozenset({"comprehensive", "quick", "stealth"})
+
+
+class HexstrikeAdapter:
+    """Adapter around the HexStrike Flask API and legacy argv execution.
+
+    Expanded to expose ALL server tool categories as capabilities so the
+    Brain's DeepSeek LLM can route to any tool on the server.
+    """
+
+    name = "hexstrike"
+    NAME = "hexstrike"
+    capabilities = (
+        # ── Discovery & Reconnaissance ────────────────────────────────────
+        AdapterCapability(
+            name="endpoint_discovery",
+            description="Discover web endpoints via active scanning (nmap, ffuf, nuclei)",
+            asset_types=("ip", "domain", "web_endpoint", "api", "unknown"),
+        ),
+        AdapterCapability(
+            name="web_behavior_analysis",
+            description="Analyze HTTP responses for redirects, content-type, headers",
+            asset_types=("web_endpoint", "api"),
+        ),
+        AdapterCapability(
+            name="api_enumeration",
+            description="Discover and fuzz API endpoints",
+            asset_types=("api",),
+        ),
+        AdapterCapability(
+            name="authenticated_discovery",
+            description="Discover paths as authenticated user using session cookies",
+            asset_types=("web_endpoint", "api"),
+        ),
+        # ── Network Scanning ──────────────────────────────────────────────
+        AdapterCapability(
+            name="port_scanning",
+            description="Nmap, masscan, rustscan for port and service discovery",
+            asset_types=("ip", "domain", "unknown"),
+        ),
+        # ── Vulnerability Scanning ────────────────────────────────────────
+        AdapterCapability(
+            name="vulnerability_scanning",
+            description="Nuclei, nikto for known vulnerability detection",
+            asset_types=("ip", "domain", "web_endpoint", "api"),
+        ),
+        # ── Web Vulnerability Testing ─────────────────────────────────────
+        AdapterCapability(
+            name="sql_injection_probing",
+            description="SQLMap for SQL injection detection and exploitation",
+            asset_types=("web_endpoint", "api"),
+        ),
+        AdapterCapability(
+            name="directory_bruteforce",
+            description="Gobuster, ffuf, feroxbuster for directory and path brute forcing",
+            asset_types=("web_endpoint", "api"),
+        ),
+        AdapterCapability(
+            name="xss_scanning",
+            description="XSS detection and payload testing",
+            asset_types=("web_endpoint", "api"),
+        ),
+        AdapterCapability(
+            name="cms_scanning",
+            description="WPScan for CMS-specific vulnerability scanning",
+            asset_types=("web_endpoint",),
+        ),
+        # ── Credential Attacks ────────────────────────────────────────────
+        AdapterCapability(
+            name="credential_attack",
+            description="Hydra brute force, hashcat/john password cracking",
+            asset_types=("ip", "domain", "web_endpoint"),
+        ),
+        # ── API Security ──────────────────────────────────────────────────
+        AdapterCapability(
+            name="api_fuzzing",
+            description="API fuzzer, GraphQL scanner, JWT analyzer for API security testing",
+            asset_types=("api", "web_endpoint"),
+        ),
+        # ── Cloud Security ────────────────────────────────────────────────
+        AdapterCapability(
+            name="cloud_security_audit",
+            description="Prowler, ScoutSuite, Trivy for cloud security auditing",
+            asset_types=("cloud_account",),
+        ),
+        # ── Container Security ────────────────────────────────────────────
+        AdapterCapability(
+            name="container_security",
+            description="kube-hunter, docker-bench, Trivy for container security scanning",
+            asset_types=("container", "ip"),
+        ),
+        # ── IaC Scanning ──────────────────────────────────────────────────
+        AdapterCapability(
+            name="iac_scanning",
+            description="Checkov, Terrascan for infrastructure-as-code scanning",
+            asset_types=("iac_config", "source_repo"),
+        ),
+        # ── Binary / Reverse Engineering ──────────────────────────────────
+        AdapterCapability(
+            name="binary_analysis",
+            description="GDB, radare2, ghidra, binwalk binary analysis via server",
+            asset_types=("binary",),
+        ),
+        # ── AD / Internal Network ─────────────────────────────────────────
+        AdapterCapability(
+            name="ad_enumeration",
+            description="enum4linux, smbmap, netexec for AD and internal network enumeration",
+            asset_types=("ad_environment", "ip", "domain"),
+        ),
+        # ── Exploit / Payload ─────────────────────────────────────────────
+        AdapterCapability(
+            name="exploit_generation",
+            description="Metasploit module selection, msfvenom payload generation",
+            asset_types=("ip", "domain", "web_endpoint"),
+        ),
+        # ── AI-Driven Intelligence ────────────────────────────────────────
+        AdapterCapability(
+            name="ai_attack_chain",
+            description="AI-driven attack chain discovery and orchestration",
+            asset_types=("ip", "domain", "web_endpoint", "api"),
+        ),
+        AdapterCapability(
+            name="technology_fingerprint",
+            description="AI-powered technology stack detection and fingerprinting",
+            asset_types=("ip", "domain", "web_endpoint"),
+        ),
+        # ── Bug Bounty Workflows ──────────────────────────────────────────
+        AdapterCapability(
+            name="bugbounty_recon",
+            description="Automated bug bounty reconnaissance workflow",
+            asset_types=("domain", "web_endpoint"),
+        ),
+        AdapterCapability(
+            name="bugbounty_comprehensive",
+            description="Full automated bug bounty comprehensive assessment",
+            asset_types=("domain", "web_endpoint", "api"),
+        ),
+    )
+
+    def __init__(
+        self,
+        runner: SafeRunner | None = None,
+        client: HexstrikeApiClient | None = None,
+        server_url: str = DEFAULT_HEXSTRIKE_SERVER,
+    ) -> None:
+        self.runner = runner or SafeRunner()
+        self.client = client or HexstrikeApiClient(server_url=server_url)
+        self.interpreter = HexStrikeInterpreter()
+
+    def execute(self, plan_or_command: dict[str, Any] | list[str], cwd: str | None = None) -> AdapterResult | dict[str, Any]:
+        if isinstance(plan_or_command, dict):
+            return self._execute_plan(plan_or_command)
+        result = self.runner.run(plan_or_command, cwd=cwd)
+        return self.normalize(result)
+
+    def plan(self, request: AdapterRequest) -> dict[str, Any]:
+        self.client.ensure_healthy()
+        objective = self._select_tools_objective(request.objective, request.options)
+        selection = {}
+        try:
+            selection = self.client.select_tools(request.target, objective)
+            if selection.get("error") or not selection.get("success", True):
+                import logging
+                logging.getLogger(__name__).warning(f"HexStrike select-tools failed: {selection.get('error')}")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"HexStrike select-tools failed: {e}")
+
+        # Determine which capability to use for execution
+        capability = request.options.get("capability") or self._intent_to_capability(request.objective)
+
+        return {
+            "adapter": self.name,
+            "request": request,
+            "objective": objective,
+            "capability": capability,
+            "selected_tools": selection.get("selected_tools", []),
+            "target_profile": selection.get("target_profile", {}),
+            "selection": selection,
+        }
+
+    def _execute_plan(self, plan: dict[str, Any]) -> AdapterResult:
+        self.client.ensure_healthy()
+        request = plan["request"]
+        intent = request.objective
+        capability = plan.get("capability", "endpoint_discovery")
+        raw_output: dict[str, Any] = {
+            "request": request,
+            "target": request.target,
+            "intent": intent,
+            "capability": capability,
+            "selected_tools": plan.get("selected_tools", []),
+            "responses": {},
+            "tool_runs": [],
+            "html_crawl": None,
+            "success": True,
+        }
+
+        # ── Capability-based dispatch (NEW) ────────────────────────────────
+        # If the Brain's DeepSeek selected a specific capability, dispatch
+        # directly to the structured server endpoint.
+        direct_result = self._execute_capability(capability, request.target, request.options)
+        if direct_result is not None:
+            raw_output["responses"]["capability_dispatch"] = direct_result
+            if direct_result.get("error") or not direct_result.get("success", True):
+                raw_output["success"] = False
+
+        # ── Discovery flow (existing behavior preserved) ───────────────────
+        if intent in DISCOVERY_INTENTS:
+            analysis = self.client.analyze_target(request.target)
+            raw_output["responses"]["analyze_target"] = analysis
+            if analysis.get("error") or not analysis.get("success", True):
+                raw_output["success"] = False
+
+            # HTML crawl: fetch the page and extract links to seed forward discovery
+            if request.target.startswith(("http://", "https://")):
+                session_store = request.options.get("session_store") if request.options else None
+                cookie_header = ""
+                if session_store:
+                    origin = get_origin(request.target)
+                    cookie_hdr_val = session_store.cookie_header(origin)
+                    if cookie_hdr_val:
+                        # Ensure cookie value is safe and strictly formatted
+                        cookie_header = f'-H "Cookie: {cookie_hdr_val}" '
+
+                quoted_target = shlex.quote(request.target)
+                crawl_result = self.client.execute_command(
+                    f"curl -sL --max-time 10 {cookie_header}{quoted_target}",
+                    use_cache=False,
+                    timeout=15,
+                )
+                raw_output["html_crawl"] = crawl_result
+
+        run_tools = plan.get("objective") != "quick" and bool(plan.get("selected_tools"))
+        if run_tools:
+            for tool in plan.get("selected_tools", [])[:3]:
+                command = self._build_tool_command(tool, request.target)
+                result = self.client.execute_command(command, use_cache=False, timeout=15)
+                raw_output["tool_runs"].append({"tool": tool, "command": command, "result": result})
+                if not result.get("success", False):
+                    raw_output["success"] = False
+
+        return self.normalize_results(raw_output)
+
+    def _execute_capability(self, capability: str, target: str, options: dict[str, Any]) -> dict[str, Any] | None:
+        """Route a capability name to the correct HexstrikeApiClient method.
+
+        Returns None for capabilities that should use the legacy discovery flow
+        (endpoint_discovery, web_behavior_analysis, authenticated_discovery).
+        """
+        # These capabilities use the existing discovery flow
+        if capability in {"endpoint_discovery", "web_behavior_analysis",
+                          "api_enumeration", "authenticated_discovery"}:
+            return None
+
+        # Filter out internal keys that shouldn't be sent to the server
+        safe_opts = {k: v for k, v in options.items()
+                     if k not in {"session_store", "capability"}}
+
+        dispatch: dict[str, Any] = {
+            # Network scanning
+            "port_scanning": lambda: self.client.run_nmap(target, **safe_opts),
+            # Vulnerability scanning
+            "vulnerability_scanning": lambda: self.client.run_nuclei(target, **safe_opts),
+            # Web vulnerability testing
+            "sql_injection_probing": lambda: self.client.run_sqlmap(target, **safe_opts),
+            "directory_bruteforce": lambda: self.client.run_gobuster(target, **safe_opts),
+            "xss_scanning": lambda: self.client.run_xsser(target, **safe_opts),
+            "cms_scanning": lambda: self.client.run_wpscan(target, **safe_opts),
+            # Credential attacks
+            "credential_attack": lambda: self.client.run_hydra(target, **safe_opts),
+            # API security
+            "api_fuzzing": lambda: self.client.run_api_fuzzer(target, **safe_opts),
+            # Cloud security
+            "cloud_security_audit": lambda: self.client.run_prowler(**safe_opts),
+            # Container security
+            "container_security": lambda: self.client.run_kube_hunter(**safe_opts),
+            # IaC scanning
+            "iac_scanning": lambda: self.client.run_checkov(**safe_opts),
+            # Binary analysis via server
+            "binary_analysis": lambda: self.client.run_radare2(target, **safe_opts),
+            # AD / internal network
+            "ad_enumeration": lambda: self.client.run_enum4linux(target, **safe_opts),
+            # Exploit generation
+            "exploit_generation": lambda: self.client.run_metasploit(**safe_opts),
+            # AI intelligence
+            "ai_attack_chain": lambda: self.client.create_attack_chain(target, **safe_opts),
+            "technology_fingerprint": lambda: self.client.detect_technologies(target, **safe_opts),
+            # Bug bounty workflows
+            "bugbounty_recon": lambda: self.client.bugbounty_recon(target, **safe_opts),
+            "bugbounty_comprehensive": lambda: self.client.bugbounty_comprehensive(target, **safe_opts),
+        }
+
+        handler = dispatch.get(capability)
+        if handler:
+            try:
+                return handler()
+            except Exception as exc:
+                return {"error": str(exc), "success": False}
+        return None
+
+    @staticmethod
+    def _intent_to_capability(intent: str) -> str:
+        """Map an intent string to the closest capability name."""
+        mapping = {
+            "discover": "endpoint_discovery",
+            "fingerprint": "endpoint_discovery",
+            "continue_discovery": "endpoint_discovery",
+            "enrich": "endpoint_discovery",
+            "authenticated_discovery": "authenticated_discovery",
+            "web_behavior_analysis": "web_behavior_analysis",
+            "port_scanning": "port_scanning",
+            "vulnerability_scanning": "vulnerability_scanning",
+            "sql_injection_probing": "sql_injection_probing",
+            "directory_bruteforce": "directory_bruteforce",
+            "xss_scanning": "xss_scanning",
+            "cms_scanning": "cms_scanning",
+            "credential_attack": "credential_attack",
+            "api_fuzzing": "api_fuzzing",
+            "cloud_security_audit": "cloud_security_audit",
+            "container_security": "container_security",
+            "iac_scanning": "iac_scanning",
+            "binary_analysis": "binary_analysis",
+            "ad_enumeration": "ad_enumeration",
+            "exploit_generation": "exploit_generation",
+            "ai_attack_chain": "ai_attack_chain",
+            "technology_fingerprint": "technology_fingerprint",
+            "bugbounty_recon": "bugbounty_recon",
+            "bugbounty_comprehensive": "bugbounty_comprehensive",
+        }
+        return mapping.get(intent, "endpoint_discovery")
+
+    def normalize_results(self, raw_output: dict[str, Any]) -> AdapterResult:
+        request = raw_output["request"]
+        target = request.target
+        asset_type = request.asset_type
+        findings: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+
+        # ── Capability dispatch results ────────────────────────────────────
+        cap_result = raw_output.get("responses", {}).get("capability_dispatch", {})
+        if cap_result:
+            capability = raw_output.get("capability", "scan")
+            stdout = cap_result.get("stdout", "") or cap_result.get("output", "") or ""
+            stderr = cap_result.get("stderr", "") or ""
+            for item in self._findings_from_command_output(target, capability, stdout, stderr, asset_type):
+                if item["path"] not in seen_paths:
+                    seen_paths.add(item["path"])
+                    findings.append(item)
+
+        # ── Analysis results ───────────────────────────────────────────────
+        analysis = raw_output.get("responses", {}).get("analyze_target", {})
+        profile = analysis.get("target_profile") or raw_output.get("target_profile") or {}
+        if profile:
+            for item in self._findings_from_profile(profile, target, asset_type):
+                if item["path"] not in seen_paths:
+                    seen_paths.add(item["path"])
+                    findings.append(item)
+
+        html_crawl = raw_output.get("html_crawl")
+        if html_crawl and html_crawl.get("stdout"):
+            for item in self._findings_from_html_crawl(html_crawl["stdout"], target, asset_type):
+                if item["path"] not in seen_paths:
+                    seen_paths.add(item["path"])
+                    findings.append(item)
+
+        for tool_run in raw_output.get("tool_runs", []):
+            tool = tool_run.get("tool", "scan")
+            result = tool_run.get("result", {})
+            stdout = result.get("stdout", "") or ""
+            stderr = result.get("stderr", "") or ""
+            for item in self._findings_from_command_output(target, tool, stdout, stderr, asset_type):
+                if item["path"] not in seen_paths:
+                    seen_paths.add(item["path"])
+                    findings.append(item)
+
+        if not findings and profile:
+            findings.append(
+                {
+                    "hypothesis": f"HexStrike analyzed {target} ({profile.get('target_type', 'unknown')}).",
+                    "path": target,
+                    "provenance": "hexstrike:analyze-target",
+                    "status": "hypothesis",
+                    "confidence": float(profile.get("confidence_score", 0.4)),
+                    "evidence": [
+                        f"risk_level={profile.get('risk_level', 'unknown')}",
+                        f"attack_surface_score={profile.get('attack_surface_score', 0)}",
+                    ],
+                    "capability": "target_analysis",
+                    "asset_type": asset_type,
+                }
+            )
+
+        success = bool(findings) and raw_output.get("success", True)
+        summary = f"HexStrike completed {len(raw_output.get('tool_runs', []))} tool run(s) for {target}."
+        capability = raw_output.get("capability", "")
+        if capability and capability not in {"endpoint_discovery"}:
+            summary = f"HexStrike executed {capability} against {target} and produced {len(findings)} finding(s)."
+        elif analysis.get("success"):
+            summary = f"HexStrike analyzed {target} and produced {len(findings)} structured finding(s)."
+
+        return AdapterResult(
+            adapter=self.name,
+            success=success,
+            summary=summary,
+            findings=findings,
+            raw=raw_output,
+        )
+
+    def normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Legacy argv-runner normalization for backward-compatible tests."""
+        return {
+            "provenance": f"hexstrike:{raw.get('argv', [])[:1]}",
+            "stdout": raw.get("stdout", ""),
+            "stderr": raw.get("stderr", ""),
+            "returncode": raw.get("returncode", 1),
+            "timed_out": raw.get("timed_out", False),
+        }
+
+    @staticmethod
+    def _select_tools_objective(intent: str, options: dict[str, Any]) -> str:
+        explicit = options.get("objective")
+        if explicit in SELECT_TOOLS_OBJECTIVES:
+            return str(explicit)
+        if intent in {"fingerprint", "enrich"}:
+            return "quick"
+        if "stealth" in intent:
+            return "stealth"
+        return "comprehensive"
+
+    @staticmethod
+    def _resolve_path(base_target: str, path: str) -> str:
+        if path.startswith(("http://", "https://")):
+            return path.rstrip("/")
+        parsed = urlsplit(base_target)
+        if parsed.scheme and parsed.netloc:
+            return urljoin(f"{parsed.scheme}://{parsed.netloc}", path)
+        return path
+
+    def _findings_from_profile(self, profile: dict[str, Any], base_target: str, asset_type: str) -> list[dict[str, Any]]:
+        findings: list[dict[str, Any]] = []
+        confidence = float(profile.get("confidence_score", 0.45))
+
+        parsed = urlsplit(base_target)
+        if parsed.path and parsed.path not in {"", "/"}:
+            findings.append(
+                {
+                    "hypothesis": f"Target path surface identified at {base_target}.",
+                    "path": base_target,
+                    "provenance": "hexstrike:analyze-target:path",
+                    "status": "hypothesis",
+                    "confidence": min(confidence + 0.1, 0.85),
+                    "evidence": [parsed.path, f"segment={parsed.path.strip('/').split('/')[0]}"],
+                    "capability": "endpoint_discovery",
+                    "asset_type": "api" if "api" in parsed.path.lower() else asset_type,
+                }
+            )
+
+        for endpoint in profile.get("endpoints", []):
+            path = self._resolve_path(base_target, str(endpoint))
+            # Use canonical classifier — endpoints from the profile may include
+            # static paths (e.g. /assets/logo.png) that must not be probed.
+            endpoint_asset_type = classify_url_asset_type(path, "web_endpoint")
+            if endpoint_asset_type == "static_asset":
+                continue
+            findings.append(
+                {
+                    "hypothesis": "Endpoint discovered during HexStrike target analysis.",
+                    "path": path,
+                    "provenance": "hexstrike:analyze-target:endpoint",
+                    "status": "hypothesis",
+                    "confidence": min(confidence + 0.15, 0.9),
+                    "evidence": [str(endpoint), f"target_type={profile.get('target_type', 'unknown')}"],
+                    "capability": "endpoint_discovery",
+                    "asset_type": endpoint_asset_type,
+                }
+            )
+
+        for subdomain in profile.get("subdomains", []):
+            host = str(subdomain)
+            path = host if host.startswith("http") else f"https://{host}"
+            findings.append(
+                {
+                    "hypothesis": "Subdomain discovered during HexStrike target analysis.",
+                    "path": path,
+                    "provenance": "hexstrike:analyze-target:subdomain",
+                    "status": "hypothesis",
+                    "confidence": min(confidence + 0.1, 0.8),
+                    "evidence": [host],
+                    "capability": "subdomain_discovery",
+                    "asset_type": "domain",
+                }
+            )
+
+        services = profile.get("services") or {}
+        if services:
+            evidence = [f"{port}/{service}" for port, service in list(services.items())[:25]]
+            findings.append(
+                {
+                    "hypothesis": f"Open services discovered on {base_target}.",
+                    "path": base_target,
+                    "provenance": "hexstrike:analyze-target:ports",
+                    "status": "hypothesis",
+                    "confidence": min(confidence + 0.2, 0.9),
+                    "evidence": evidence,
+                    "capability": "port_discovery",
+                    "asset_type": asset_type,
+                    "metadata": {"services": services},
+                }
+            )
+
+        technologies = [tech for tech in profile.get("technologies", []) if tech and tech != "unknown"]
+        if technologies:
+            findings.append(
+                {
+                    "hypothesis": f"Technology stack identified for {base_target}.",
+                    "path": base_target,
+                    "provenance": "hexstrike:analyze-target:technology",
+                    "status": "hypothesis",
+                    "confidence": min(confidence + 0.05, 0.75),
+                    "evidence": technologies,
+                    "capability": "technology_fingerprint",
+                    "asset_type": asset_type,
+                    "metadata": {"technologies": technologies},
+                }
+            )
+
+        if profile.get("cms_type"):
+            cms = str(profile["cms_type"])
+            findings.append(
+                {
+                    "hypothesis": f"CMS fingerprint suggests {cms} at {base_target}.",
+                    "path": base_target,
+                    "provenance": "hexstrike:analyze-target:cms",
+                    "status": "hypothesis",
+                    "confidence": min(confidence + 0.1, 0.8),
+                    "evidence": [cms, f"cms_type={cms}"],
+                    "capability": "technology_fingerprint",
+                    "asset_type": asset_type,
+                }
+            )
+
+        return findings
+
+    def _findings_from_html_crawl(self, html: str, base_target: str, asset_type: str) -> list[dict[str, Any]]:
+        """Turn HTML link extraction into endpoint_discovery findings."""
+        links = self.interpreter.extract_html_links(base_target, html)
+        findings: list[dict[str, Any]] = []
+        for link in links:
+            # extract_html_links already filters static assets, but classify again
+            # defensively so any edge-case URL (e.g. /api/v1/logo.png?v=2) is caught.
+            link_asset_type = classify_url_asset_type(link, "web_endpoint")
+            if link_asset_type == "static_asset":
+                continue
+            findings.append(
+                {
+                    "hypothesis": f"Endpoint discovered via HTML crawl of {base_target}.",
+                    "path": link,
+                    "provenance": "hexstrike:html_crawl",
+                    "status": "hypothesis",
+                    "confidence": 0.6,
+                    "evidence": [link, f"crawled_from={base_target}"],
+                    "capability": "endpoint_discovery",
+                    "asset_type": link_asset_type,
+                }
+            )
+        return findings
+
+    def _findings_from_command_output(
+        self,
+        target: str,
+        tool: str,
+        stdout: str,
+        stderr: str,
+        asset_type: str,
+    ) -> list[dict[str, Any]]:
+        interpreted = self.interpreter.interpret(target, tool, stdout, asset_type)
+        findings: list[dict[str, Any]] = []
+        for item in interpreted:
+            item = dict(item)
+            item["capability"] = f"{tool}_scan"
+            findings.append(item)
+
+        if stderr.strip() and not findings:
+            findings.append(
+                {
+                    "hypothesis": f"HexStrike {tool} produced stderr output for {target}.",
+                    "path": target,
+                    "provenance": f"hexstrike:{tool}:stderr",
+                    "status": "hypothesis",
+                    "confidence": 0.25,
+                    "evidence": [stderr[:2000]],
+                    "capability": f"{tool}_scan",
+                    "asset_type": asset_type,
+                }
+            )
+        return findings
+
+    @staticmethod
+    def _build_tool_command(tool: str, target: str) -> str:
+        quoted_target = shlex.quote(target)
+        commands = {
+            "nmap": f"nmap -sV -T4 {quoted_target}",
+            "httpx": f"httpx -silent -u {quoted_target}",
+            "nuclei": f"nuclei -u {quoted_target} -silent",
+            "gobuster": f"gobuster dir -u {quoted_target} -w /usr/share/wordlists/dirb/common.txt -q",
+            "ffuf": f"ffuf -u {quoted_target}/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,301,302,403 -s",
+            "nikto": f"nikto -h {quoted_target}",
+            "wpscan": f"wpscan --url {quoted_target}",
+            "sqlmap": f"sqlmap -u {quoted_target} --batch",
+        }
+        return commands.get(tool, f"{tool} {quoted_target}")
+
+
+DEFAULT_REGISTRY.register_adapter(HexstrikeAdapter.NAME, HexstrikeAdapter)

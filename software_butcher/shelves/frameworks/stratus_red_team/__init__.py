@@ -1,0 +1,1 @@
+"""Stratus Red Team adapter."""
