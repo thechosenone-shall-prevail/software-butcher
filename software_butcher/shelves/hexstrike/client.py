@@ -6,13 +6,14 @@ APIs instead of the generic /api/command passthrough.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import requests
 
 
-DEFAULT_HEXSTRIKE_SERVER = "http://127.0.0.1:8888"
-DEFAULT_REQUEST_TIMEOUT = 30
+DEFAULT_HEXSTRIKE_SERVER = os.environ.get("HEXSTRIKE_URL", "http://127.0.0.1:8888")
+DEFAULT_REQUEST_TIMEOUT = int(os.environ.get("HEXSTRIKE_TIMEOUT", "60"))
 
 
 class HexstrikeServerUnavailableError(RuntimeError):

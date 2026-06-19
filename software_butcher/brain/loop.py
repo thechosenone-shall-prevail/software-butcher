@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
+from software_butcher.brain.context import build_brain_context
 from software_butcher.brain.guards import LoopGuard
 from software_butcher.brain.hypotheses import HypothesisGenerator
 from software_butcher.brain.llm_advisor import DeepSeekAdvisor
@@ -16,10 +20,6 @@ from software_butcher.shelves.hexstrike.client import HexstrikeServerUnavailable
 from software_butcher.state.path_graph import parent_path as compute_parent_path
 from software_butcher.state.schema import Finding
 from software_butcher.state.store import FindingStore
-
-import openai
-import json
-import sys
 
 BRAIN_SYSTEM_PROMPT = """
 You are the reasoning engine of Software Butcher, an autonomous security assessment platform
@@ -88,6 +88,8 @@ STRATEGY GUIDELINES:
 6. Use cloud/container tools when cloud infrastructure is detected
 7. Use AD enumeration when SMB/LDAP/Kerberos services are found
 8. Prefer the capability that produces the HIGHEST confidence findings
+9. Respect engagement phase: recon → exploit → foothold → privesc → exfil
+10. In validation_mode (high convergence), prefer confirmation over new discovery
 
 Respond ONLY as JSON:
 {
@@ -165,6 +167,7 @@ def _findings_from_adapter_result(
     hypothesis,
     parent_path_value: str | None,
     default_asset_type: str,
+    branch_id: str | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     for item in result.findings:
@@ -178,7 +181,7 @@ def _findings_from_adapter_result(
                 confidence=float(item.get("confidence", 0.5 if result.success else 0.3)),
                 parent_path=item.get("parent_path") or parent_path_value,
                 asset_type=item.get("asset_type", default_asset_type),
-                metadata={**item.get("metadata", {}), **({"capability": item["capability"]} if item.get("capability") else {})},
+                metadata={**item.get("metadata", {}), **({"capability": item["capability"]} if item.get("capability") else {}), **({"branch_id": branch_id} if branch_id else {})},
             )
         )
 
@@ -205,6 +208,7 @@ def _run_legacy_tool(
     runner: SafeRunner | None,
     parent_path_value: str | None,
     default_asset_type: str,
+    branch_id: str | None = None,
 ) -> Finding | None:
     tool_spec = None
     preferred = hypothesis.metadata.get("tool") if hypothesis.metadata else None
@@ -234,7 +238,7 @@ def _run_legacy_tool(
         parent_path=parent_path_value,
         asset_type=default_asset_type,
     )
-    store.add_finding(finding)
+    store.ingest_finding(finding, branch_id=branch_id)
     return finding
 
 
@@ -248,7 +252,8 @@ def run_brain_once(
     router: AssetRouter | None = None,
     asset: Asset | None = None,
     advisor: DeepSeekAdvisor | None = None,
-    llm_client: openai.Client | None = None,
+    llm_client: Any | None = None,
+    branch_id: str | None = None,
 ) -> Optional[Finding]:
     """Run a single Brain iteration: pop hypothesis, route, execute, write findings."""
     # ── DeepSeek advisor: optionally reorder the queue before popping ──────────
@@ -279,13 +284,16 @@ def run_brain_once(
     # LLM-DRIVEN REASONING (Phase 2) — DeepSeek capability selector
     decision = None
     if llm_client is not None and isinstance(registry, AdapterRegistry):
-        findings_summary = "\n".join([
-            f"- [{f.status}] {f.path}: {f.hypothesis} (conf: {f.confidence})"
-            for f in sorted(store.findings.values(), key=lambda x: x.created_at)[-10:]
-        ])
-        
-        sys.stderr.write(f"\n[Brain] Consulting DeepSeek for hypothesis: {hypothesis.path}\n")
-        
+        context = build_brain_context(
+            list(store.findings.values()),
+            store.engagement,
+            store.clusters,
+        )
+        phase = store.engagement.phase
+        pcs_mode = "validation" if store.pcs.state.validation_mode else "exploration"
+
+        sys.stderr.write(f"\n[Brain] Consulting DeepSeek for hypothesis: {hypothesis.path} (phase={phase}, pcs={pcs_mode})\n")
+
         try:
             llm_response = llm_client.chat.completions.create(
                 model="deepseek-chat",
@@ -294,10 +302,19 @@ def run_brain_once(
                     "content": BRAIN_SYSTEM_PROMPT
                 }, {
                     "role": "user",
-                    "content": f"Finding state (last 10 findings):\n{findings_summary}\n\nCurrent hypothesis to investigate:\n- Path: {hypothesis.path}\n- Reason: {hypothesis.reason}\n- Intent: {explicit_intent or 'discover'}\n\nWhat capability should I run on this hypothesis to maximize information gain?"
+                    "content": (
+                        f"{context}\n\n"
+                        f"PCS mode: {pcs_mode}\n"
+                        f"Current hypothesis:\n"
+                        f"- Path: {hypothesis.path}\n"
+                        f"- Reason: {hypothesis.reason}\n"
+                        f"- Intent: {explicit_intent or 'discover'}\n"
+                        f"- Branch: {branch_id or 'primary'}\n\n"
+                        "What capability maximizes information gain for this hypothesis?"
+                    ),
                 }],
                 response_format={"type": "json_object"},
-                max_tokens=256
+                max_tokens=768,
             )
             
             content = llm_response.choices[0].message.content
@@ -341,6 +358,23 @@ def run_brain_once(
 
     route = _route_for_decision(decision, router)
 
+    tool_limit = scope.max_tool_calls if scope else 50
+    if not store.can_run_tool(tool_limit):
+        budget_finding = Finding(
+            hypothesis=hypothesis.reason,
+            path=hypothesis.path,
+            provenance="brain:tool_budget",
+            status="hypothesis",
+            evidence=[f"Scope tool-call budget exhausted ({store.tool_calls}/{tool_limit})."],
+            confidence=0.1,
+            parent_path=parent_path_value,
+            asset_type=decision.asset.asset_type,
+        )
+        store.ingest_finding(budget_finding, branch_id=branch_id)
+        store.queue.complete(hypothesis.id)
+        store.save_or_log()
+        return budget_finding
+
     primary_finding: Finding | None = None
     adapter_registry = registry if isinstance(registry, AdapterRegistry) else None
     legacy_registry = registry if isinstance(registry, Registry) else (DEFAULT_REGISTRY if registry is None else None)
@@ -351,6 +385,10 @@ def run_brain_once(
     if adapter is not None and hasattr(adapter, "plan"):
         scope_payload = scope.to_dict() if scope else {}
         adapter_options = dict(decision.options)
+        if hypothesis.metadata:
+            for key in ("technology", "cve_id", "authenticated"):
+                if key in hypothesis.metadata:
+                    adapter_options[key] = hypothesis.metadata[key]
         adapter_options["session_store"] = store.session_store
         request = AdapterRequest(
             objective=decision.intent,
@@ -361,6 +399,10 @@ def run_brain_once(
         )
         try:
             plan = adapter.plan(request)
+            if not store.record_tool_call(tool_limit):
+                store.queue.complete(hypothesis.id)
+                store.save_or_log()
+                return None
             result = adapter.execute(plan)
         except HexstrikeServerUnavailableError as exc:
             # Server is down — record a finding so the run doesn't crash and
@@ -375,25 +417,27 @@ def run_brain_once(
                 parent_path=parent_path_value,
                 asset_type=decision.asset.asset_type,
             )
-            store.add_finding(error_finding)
+            store.ingest_finding(error_finding, branch_id=branch_id)
             store.queue.complete(hypothesis.id)
-            try:
-                store.save()
-            except Exception:
-                pass
+            store.save_or_log()
             return error_finding
         for finding in _findings_from_adapter_result(
             result,
             hypothesis,
             parent_path_value,
             decision.asset.asset_type,
+            branch_id=branch_id,
         ):
-            if store.add_finding(finding):
+            if store.ingest_finding(finding, branch_id=branch_id):
                 for generated in hypothesis_generator.generate(finding):
                     store.add_hypothesis(generated)
                 if primary_finding is None:
                     primary_finding = finding
     elif legacy_registry is not None:
+        if not store.record_tool_call(tool_limit):
+            store.queue.complete(hypothesis.id)
+            store.save_or_log()
+            return None
         primary_finding = _run_legacy_tool(
             store,
             hypothesis,
@@ -401,16 +445,14 @@ def run_brain_once(
             runner,
             parent_path_value,
             decision.asset.asset_type,
+            branch_id=branch_id,
         )
         if primary_finding:
             for generated in hypothesis_generator.generate(primary_finding):
                 store.add_hypothesis(generated)
 
     store.queue.complete(hypothesis.id)
-    try:
-        store.save()
-    except Exception:
-        pass
+    store.save_or_log()
 
     return primary_finding
 
@@ -425,7 +467,7 @@ def run_brain_loop(
     hypothesis_generator: HypothesisGenerator | None = None,
     router: AssetRouter | None = None,
     asset: Asset | None = None,
-    llm_client: openai.Client | None = None,
+    llm_client: Any | None = None,
 ) -> int:
     """Run the Brain loop until the guard stops it or the queue is empty."""
     guard = LoopGuard(max_steps=iterations)
@@ -460,13 +502,15 @@ class BrainLoop:
         store: FindingStore,
         scope: Scope | None = None,
         registry: AdapterRegistry | Registry | None = None,
-        max_steps: int = 1,
+        max_steps: int = 25,
         no_new_limit: int = 5,
+        max_branches: int = 5,
+        adaptive_pcs: bool = True,
         runner: Optional[SafeRunner] = None,
         policy: BrainPolicy | None = None,
         hypothesis_generator: HypothesisGenerator | None = None,
         router: AssetRouter | None = None,
-        llm_client: openai.Client | None = None,
+        llm_client: Any | None = None,
         advisor: DeepSeekAdvisor | None = None,
     ) -> None:
         self.store = store
@@ -474,6 +518,8 @@ class BrainLoop:
         self.registry = registry or default_registry()
         self.max_steps = max_steps
         self.no_new_limit = no_new_limit
+        self.max_branches = max(1, max_branches)
+        self.adaptive_pcs = adaptive_pcs
         self.runner = runner
         self.policy = policy or BrainPolicy()
         self.hypothesis_generator = hypothesis_generator or HypothesisGenerator()
@@ -481,8 +527,9 @@ class BrainLoop:
         self.llm_client = llm_client
         self.advisor = advisor
 
-    def run_once(self, asset: Asset | None = None) -> dict[str, Any]:
+    def run_once(self, asset: Asset | None = None, branch_id: str | None = None) -> dict[str, Any]:
         before = len(self.store.findings)
+        branch_id = branch_id or self.store.new_branch_id()
         finding = run_brain_once(
             self.store,
             registry=self.registry,
@@ -494,32 +541,78 @@ class BrainLoop:
             asset=asset,
             advisor=self.advisor,
             llm_client=self.llm_client,
+            branch_id=branch_id,
         )
         if finding is None:
             pending = [item for item in self.store.queue.to_list() if item["status"] == "pending"]
             if pending:
-                return {"status": "skipped", "reason": "no finding produced; pending hypotheses remain"}
-            return {"status": "idle", "reason": "hypothesis queue empty"}
+                return {"status": "skipped", "reason": "no finding produced; pending hypotheses remain", "branch_id": branch_id}
+            return {"status": "idle", "reason": "hypothesis queue empty", "branch_id": branch_id}
 
         return {
             "status": "executed",
             "finding": finding.to_dict(),
             "new_findings": len(self.store.findings) - before,
+            "branch_id": branch_id,
+            "phase": self.store.engagement.phase,
+            "convergence_score": finding.convergence_score,
         }
 
     def run(self, asset: Asset | None = None) -> list[dict[str, Any]]:
         guard = LoopGuard(max_steps=self.max_steps, no_new_limit=self.no_new_limit)
         events: list[dict[str, Any]] = []
+        tool_limit = self.scope.max_tool_calls if self.scope else 50
+        wave_new_findings: list[Finding] = []
 
         while guard.can_continue():
-            before = len(self.store.findings)
-            event = self.run_once(asset=asset)
-            events.append(event)
-            if event.get("status") == "idle":
+            if not self.store.can_run_tool(tool_limit):
+                events.append({
+                    "status": "budget_exhausted",
+                    "reason": f"Scope tool-call budget exhausted ({self.store.tool_calls}/{tool_limit})",
+                })
                 break
-            if event.get("status") == "skipped":
+
+            before_ids = set(self.store.findings.keys())
+            wave_events: list[dict[str, Any]] = []
+
+            if self.adaptive_pcs:
+                branch_count, pcs_reason = self.store.pcs.branches_for_step(
+                    self.store.clusters,
+                    wave_new_findings,
+                )
+                branch_count = min(branch_count, self.max_branches)
+            else:
+                branch_count, pcs_reason = self.max_branches, "fixed_branch_count"
+
+            sys.stderr.write(f"[PCS] step branches={branch_count} reason={pcs_reason}\n")
+
+            if branch_count <= 1:
+                wave_events.append(self.run_once(asset=asset))
+            else:
+                with ThreadPoolExecutor(max_workers=branch_count) as pool:
+                    futures = [
+                        pool.submit(self.run_once, asset=asset, branch_id=self.store.new_branch_id())
+                        for _ in range(branch_count)
+                    ]
+                    for future in as_completed(futures):
+                        wave_events.append(future.result())
+
+            events.append({"status": "pcs_step", "branches": branch_count, "reason": pcs_reason})
+            events.extend(wave_events)
+
+            if all(event.get("status") == "idle" for event in wave_events):
+                break
+
+            new_ids = set(self.store.findings.keys()) - before_ids
+            wave_new_findings = [self.store.findings[fid] for fid in new_ids if fid in self.store.findings]
+            new_in_wave = len(new_ids)
+
+            if all(event.get("status") == "skipped" for event in wave_events):
                 guard.record(0)
-                continue
-            guard.record(len(self.store.findings) - before)
+            else:
+                guard.record(new_in_wave)
+
+            self.store.recompute_state()
+            self.store.save_or_log()
 
         return events

@@ -6,20 +6,16 @@ services:
     image: hexstrike-kali:latest
     container_name: hexstrike_app
     volumes:
-      # Mount the entire Hexstrike-redteam directory to /app in the container
       - .:/app
-    # Run container in interactive mode and keep it alive
-    stdin_open: true 
+    stdin_open: true
     tty: true
-    # Provide network access to Windows localhost
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    # Port mapping if the server wants to bind publicly
     ports:
       - "8888:8888"
     networks:
-      - mynetwork
+      - hexstrike_net
 
 networks:
-  mynetwork:
-    external: true
+  hexstrike_net:
+    driver: bridge

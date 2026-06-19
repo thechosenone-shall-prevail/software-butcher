@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "software-butcher"
+version = "0.1.0"
+description = "Autonomous security assessment harness — Shelf, Brain, Synthesis"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "requests>=2.31.0,<3.0.0",
+    "openai>=1.0.0,<2.0.0",
+]
+
+[project.optional-dependencies]
+hexstrike = [
+    "flask>=2.3.0,<4.0.0",
+    "psutil>=5.9.0,<6.0.0",
+    "fastmcp>=0.2.0,<1.0.0",
+    "beautifulsoup4>=4.12.0,<5.0.0",
+    "selenium>=4.15.0,<5.0.0",
+    "webdriver-manager>=4.0.0,<5.0.0",
+    "aiohttp>=3.8.0,<4.0.0",
+    "mitmproxy>=9.0.0,<11.0.0",
+]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[project.scripts]
+software-butcher = "software_butcher.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["software_butcher*"]
+
+[tool.pytest.ini_options]
+testpaths = ["software_butcher/tests"]

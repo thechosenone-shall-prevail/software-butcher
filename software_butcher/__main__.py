@@ -8,19 +8,27 @@ import os
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
-try:
-    import openai
-except ImportError:
-    openai = None
-
 from software_butcher.brain.loop import BrainLoop
+from software_butcher.brain.llm_advisor import DeepSeekAdvisor
 from software_butcher.core.classifier import classify_target
 from software_butcher.core.framework_config import FrameworkConfigSet
 from software_butcher.core.health import FrameworkHealth
+from software_butcher.core.llm import create_deepseek_client
 from software_butcher.core.scope import Scope
 from software_butcher.project import ButcherProject
 from software_butcher.state.store import FindingStore
 from software_butcher.synthesis import Synthesizer
+
+
+def _load_dotenv(path: Path | None = None) -> None:
+    env_path = path or Path(".env")
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, val = line.split("=", 1)
+            os.environ.setdefault(key.strip(), val.strip())
 
 
 def main() -> None:
@@ -47,10 +55,12 @@ def main() -> None:
     bootstrap_parser.add_argument("--execute", action="store_true")
 
     run_parser = subparsers.add_parser("run", help="Run a bounded Software Butcher pass")
-    run_parser.add_argument("--scope", required=True, help="Scope JSON path")
+    run_parser.add_argument("--scope", required=True, help="Scope JSON path (flat or comprehensive)")
     run_parser.add_argument("--target", required=True, help="Target locator")
     run_parser.add_argument("--workspace", default="software_butcher/workspaces/default")
-    run_parser.add_argument("--steps", type=int, default=1)
+    run_parser.add_argument("--steps", type=int, default=25, help="Brain loop step budget (default: 25)")
+    run_parser.add_argument("--max-branches", type=int, default=5, help="PCS branch ceiling (default: 5)")
+    run_parser.add_argument("--no-adaptive-pcs", action="store_true", help="Disable PCS; always run max-branches per step")
     run_parser.add_argument("--no-new-limit", type=int, default=5, help="Stop after N consecutive steps with no new findings")
     run_parser.add_argument("--json", action="store_true")
 
@@ -92,14 +102,7 @@ def main() -> None:
         return
 
     if args.command == "run":
-        # Load .env file automatically if present
-        env_path = Path(".env")
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, val = line.split("=", 1)
-                    os.environ[key.strip()] = val.strip()
+        _load_dotenv()
 
         scope = Scope.load(args.scope)
         asset = classify_target(args.target)
@@ -108,30 +111,23 @@ def main() -> None:
         project.seed_asset(asset)
 
         health = FrameworkHealth()
-        
-        llm_client = None
-        if openai and os.environ.get("DEEPSEEK_API_KEY"):
-            llm_client = openai.Client(
-                api_key=os.environ.get("DEEPSEEK_API_KEY"),
-                base_url="https://api.deepseek.com/v1"
-            )
-            
-        from software_butcher.brain.llm_advisor import DeepSeekAdvisor
+        llm_client = create_deepseek_client()
         advisor = DeepSeekAdvisor()
-            
+
         brain = BrainLoop(
-            project.findings, 
-            scope=scope, 
-            max_steps=args.steps, 
+            project.findings,
+            scope=scope,
+            max_steps=args.steps,
             no_new_limit=args.no_new_limit,
+            max_branches=args.max_branches,
+            adaptive_pcs=not args.no_adaptive_pcs,
             llm_client=llm_client,
-            advisor=advisor
+            advisor=advisor,
         )
         events = brain.run(asset)
         project.save()
 
-        # Auto-synthesize verdict at the end of every run
-        report = Synthesizer().synthesize(project.findings)
+        report = Synthesizer().synthesize(project.findings, llm_client=llm_client)
 
         payload = {
             "asset": asset.to_dict(),
@@ -163,8 +159,10 @@ def main() -> None:
         return
 
     if args.command == "synthesize":
+        _load_dotenv()
         store = FindingStore.load(args.state)
-        report = Synthesizer().synthesize(store)
+        llm_client = create_deepseek_client()
+        report = Synthesizer().synthesize(store, llm_client=llm_client)
         if args.json:
             print(json.dumps(report.to_dict(), indent=2))
         else:

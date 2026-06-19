@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from dataclasses import asdict, dataclass, field
+from typing import Any
 
 from software_butcher.state.schema import Finding
 from software_butcher.state.store import FindingStore
 from software_butcher.synthesis.verdict import Verdict
-import openai
-import json
-import sys
 
 
 @dataclass
@@ -103,7 +103,7 @@ Rules for 'reproduction_steps' and 'fixes':
 - Provide actionable, evidence-backed steps and recommendations based ONLY on the findings.
 """
 
-    def synthesize(self, store: FindingStore, llm_client: openai.Client | None = None) -> TechnicalReport:
+    def synthesize(self, store: FindingStore, llm_client: Any | None = None) -> TechnicalReport:
         findings = list(store.findings.values())
         verdict = self._verdict(findings, llm_client)
         cited = self._cited_findings(findings)
@@ -118,7 +118,7 @@ Rules for 'reproduction_steps' and 'fixes':
             ],
         )
 
-    def _verdict(self, findings: list[Finding], llm_client: openai.Client | None = None) -> Verdict:
+    def _verdict(self, findings: list[Finding], llm_client: Any | None = None) -> Verdict:
         if not findings:
             return Verdict(
                 name="secure",
@@ -126,7 +126,6 @@ Rules for 'reproduction_steps' and 'fixes':
             )
 
         active = [finding for finding in findings if finding.status != "dismissed"]
-        # Exclude static assets from signal matching
         interactive = [f for f in active if f.asset_type != "static_asset"]
         text = self._text(interactive)
         confirmed = [finding for finding in active if finding.status == "confirmed"]
@@ -134,19 +133,19 @@ Rules for 'reproduction_steps' and 'fixes':
 
         if llm_client:
             try:
-                findings_summary = "\\n".join([
-                    f"- [{f.status}] {f.id}: {f.hypothesis} (conf: {f.confidence})\\n  Evidence: {f.evidence}"
+                findings_summary = "\n".join([
+                    f"- [{f.status}] {f.id}: {f.hypothesis} (conf: {f.confidence})\n  Evidence: {f.evidence}"
                     for f in active
                 ])
-                sys.stderr.write("\\n[Synthesis] Consulting LLM for final verdict...\\n")
+                sys.stderr.write("\n[Synthesis] Consulting LLM for final verdict...\n")
                 response = llm_client.chat.completions.create(
-                    model="deepseek-chat", # Configurable model
+                    model="deepseek-chat",
                     messages=[
                         {"role": "system", "content": self.LLM_SYNTHESIS_PROMPT},
-                        {"role": "user", "content": f"Analyze these findings and generate the JSON report:\\n\\n{findings_summary}"}
+                        {"role": "user", "content": f"Analyze these findings and generate the JSON report:\n\n{findings_summary}"},
                     ],
                     response_format={"type": "json_object"},
-                    max_tokens=1000
+                    max_tokens=1000,
                 )
                 content = response.choices[0].message.content
                 result = json.loads(content) if content else {}
@@ -155,12 +154,11 @@ Rules for 'reproduction_steps' and 'fixes':
                     summary=result.get("summary", "LLM verdict generated."),
                     cited_findings=result.get("cited_findings", cited),
                     reproduction_steps=result.get("reproduction_steps", []),
-                    fixes=result.get("fixes", [])
+                    fixes=result.get("fixes", []),
                 )
-            except Exception as e:
-                sys.stderr.write(f"[Synthesis] LLM synthesis failed ({e}), falling back to keyword matching.\\n")
+            except Exception as exc:
+                sys.stderr.write(f"[Synthesis] LLM synthesis failed ({exc}), falling back to keyword matching.\n")
 
-        # Fallback to keyword matching
         if confirmed and any(signal in text for signal in self.COMPROMISE_SIGNALS):
             return Verdict(
                 name="compromised",

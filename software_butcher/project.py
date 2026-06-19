@@ -30,6 +30,7 @@ class ButcherProject:
         return self.router.route(asset, intent=intent)
 
     def seed_asset(self, asset: Asset, reason: str = "Initial target supplied by user") -> None:
+        self.findings.set_base_target(asset.locator)
         self.findings.add_hypothesis(
             Hypothesis(
                 path=asset.locator,
