@@ -320,8 +320,10 @@ for pkg in "${PYTHON_PKGS[@]}"; do
     apt_install "$pkg"
 done
 
-# Upgrade pip
-pip3 install --break-system-packages --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1
+# Upgrade pip (tolerate failures so installer continues)
+if ! pip3 install --break-system-packages --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1; then
+    log_warn "pip upgrade failed; continuing with remaining setup"
+fi
 log_info "pip upgraded to latest"
 
 # Install Python requirements from requirements.txt
