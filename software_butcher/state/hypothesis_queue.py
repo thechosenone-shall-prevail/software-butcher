@@ -25,13 +25,28 @@ class HypothesisQueue:
         normalized = self._normalize_hypothesis(hypothesis, base_target)
         if normalized is None:
             return
-        key = self._key(normalized.path, normalized.reason)
+        dedupe_key = self._dedupe_key(normalized)
         if self._lock:
             with self._lock:
+                if self._has_active_dedupe(dedupe_key):
+                    return
+                key = self._key(normalized.path, normalized.reason)
                 if key not in self._items:
                     self._items[key] = normalized
-        elif key not in self._items:
-            self._items[key] = normalized
+        else:
+            if self._has_active_dedupe(dedupe_key):
+                return
+            key = self._key(normalized.path, normalized.reason)
+            if key not in self._items:
+                self._items[key] = normalized
+
+    def _has_active_dedupe(self, dedupe_key: str) -> bool:
+        for item in self._items.values():
+            if item.status not in {"pending", "in_progress"}:
+                continue
+            if self._dedupe_key(item) == dedupe_key:
+                return True
+        return False
 
     def add_from_finding(self, finding: Finding, base_target: str = "") -> None:
         if finding.asset_type in {"binary", "source_repo", "static_asset"}:
@@ -129,3 +144,8 @@ class HypothesisQueue:
     @staticmethod
     def _key(path: str, reason: str) -> str:
         return f"{path}::{reason}"
+
+    @staticmethod
+    def _dedupe_key(hypothesis: Hypothesis) -> str:
+        intent = str((hypothesis.metadata or {}).get("intent", "")).lower()
+        return f"{hypothesis.path.rstrip('/').lower()}::{intent}"

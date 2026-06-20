@@ -18,7 +18,8 @@ from software_butcher.core.registry import DEFAULT_REGISTRY, AdapterRegistry, Re
 from software_butcher.core.router import AssetRouter, RouteDecision
 from software_butcher.core.runner import SafeRunner
 from software_butcher.core.scope import Scope
-from software_butcher.core.url_utils import host_key
+from software_butcher.core.url_utils import base_web_url, host_key
+from software_butcher.state.recon_checklist import HOST_LEVEL_RECON_CAPABILITIES
 from software_butcher.shelves.hexstrike.client import HexstrikeServerUnavailableError
 from software_butcher.state.path_graph import parent_path as compute_parent_path
 from software_butcher.state.schema import Finding
@@ -99,7 +100,7 @@ def _apply_recon_gate(
     decision: PolicyDecision,
     explicit_intent: str | None,
 ) -> PolicyDecision:
-    """Block exploit scanners until the per-host recon checklist is complete."""
+    """Block exploit scanners until per-host recon completes on the base URL."""
     if decision.asset.asset_type not in {"web_endpoint", "api", "domain", "unknown"}:
         return decision
 
@@ -112,6 +113,29 @@ def _apply_recon_gate(
         return decision
 
     chosen = str((decision.options or {}).get("capability") or decision.intent or explicit_intent or "")
+    recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
+
+    if missing in HOST_LEVEL_RECON_CAPABILITIES:
+        if hypothesis.path.rstrip("/").lower() != recon_base.lower():
+            sys.stderr.write(
+                f"[Brain] Recon gate on {host}: running {missing} on {recon_base} "
+                f"(not {hypothesis.path})\n"
+            )
+            hypothesis.path = recon_base
+            preferred = _INTENT_ADAPTER_MAP.get(missing, "hexstrike")
+            return PolicyDecision(
+                intent=missing,
+                asset=Asset(
+                    locator=recon_base,
+                    asset_type=decision.asset.asset_type,
+                    parent=decision.asset.parent,
+                    metadata=decision.asset.metadata,
+                ),
+                preferred_adapter=preferred,
+                reason=f"Host-level recon step {missing} runs on base target before path-specific work.",
+                options={"capability": missing},
+            )
+
     if chosen == missing or explicit_intent == missing:
         return decision
 
@@ -119,9 +143,15 @@ def _apply_recon_gate(
     sys.stderr.write(
         f"[Brain] Recon gate on {host}: forcing {missing} before {chosen or 'exploit scanning'}\n"
     )
+    hypothesis.path = recon_base
     return PolicyDecision(
         intent=missing,
-        asset=decision.asset,
+        asset=Asset(
+            locator=recon_base,
+            asset_type=decision.asset.asset_type,
+            parent=decision.asset.parent,
+            metadata=decision.asset.metadata,
+        ),
         preferred_adapter=preferred,
         reason=f"Recon checklist incomplete for {host}; run {missing} before {chosen or 'exploit scanning'}.",
         options={"capability": missing},

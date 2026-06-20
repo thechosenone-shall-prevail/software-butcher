@@ -77,7 +77,7 @@ class FindingStore:
             if not added:
                 return False
 
-            record_recon_progress(self.recon_checklist, finding)
+            record_recon_progress(self.recon_checklist, finding, base_target=self._base_target)
             self._recompute_state_unlocked()
             return True
 

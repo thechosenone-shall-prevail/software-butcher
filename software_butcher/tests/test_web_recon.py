@@ -1,10 +1,11 @@
-"""Tests for web recon gating, URL normalization, and app-context paths."""
+"""Tests for web recon gating, URL normalization, and queue dedupe."""
 
 from software_butcher.brain.loop import _apply_recon_gate
 from software_butcher.brain.policy import BrainPolicy, PolicyDecision
-from software_butcher.core.app_wordlists import contextual_paths_for_target
 from software_butcher.core.assets import Asset
+from software_butcher.core.domain_seed import build_domain_seed_hypotheses
 from software_butcher.core.url_utils import canonical_web_url, is_plausible_target_path, resolve_tool_path
+from software_butcher.state.hypothesis_queue import HypothesisQueue
 from software_butcher.state.recon_checklist import ReconChecklist, record_recon_progress
 from software_butcher.state.schema import Finding, Hypothesis
 from software_butcher.state.store import FindingStore
@@ -38,9 +39,33 @@ def test_parent_path_hypothesis_skips_junk_paths(tmp_path):
     assert "http://hallbooking.srmrmp.edu.in" in parents
 
 
-def test_hallbooking_context_paths_include_hall():
-    paths = contextual_paths_for_target("http://hallbooking.srmrmp.edu.in")
-    assert "http://hallbooking.srmrmp.edu.in/hall" in paths
+def test_domain_seed_only_three_root_hypotheses():
+    asset = Asset(locator="http://hallbooking.srmrmp.edu.in", asset_type="web_endpoint")
+    hyps = build_domain_seed_hypotheses(asset)
+    assert len(hyps) == 3
+    assert all(h.path.rstrip("/") == "http://hallbooking.srmrmp.edu.in" for h in hyps)
+    assert not any(h.metadata.get("generated_by") == "app_context_paths" for h in hyps)
+
+
+def test_recon_gate_redirects_host_steps_to_base(tmp_path):
+    store = FindingStore(tmp_path / "state.json")
+    store.set_base_target("http://hallbooking.srmrmp.edu.in")
+    hypothesis = Hypothesis(
+        path="http://hallbooking.srmrmp.edu.in/login",
+        reason="guess",
+        source_finding_id="x",
+        metadata={"intent": "endpoint_discovery"},
+    )
+    decision = PolicyDecision(
+        intent="endpoint_discovery",
+        asset=Asset(locator=hypothesis.path, asset_type="web_endpoint"),
+        preferred_adapter="hexstrike",
+        reason="wrong path",
+        options={"capability": "endpoint_discovery"},
+    )
+    gated = _apply_recon_gate(store, hypothesis, decision, "endpoint_discovery")
+    assert gated.intent == "web_behavior_analysis"
+    assert hypothesis.path.rstrip("/") == "http://hallbooking.srmrmp.edu.in"
 
 
 def test_recon_gate_blocks_nuclei_until_checklist_complete(tmp_path):
@@ -93,16 +118,31 @@ def test_policy_starts_web_targets_with_behavior_analysis():
     assert decision.intent == "web_behavior_analysis"
 
 
-def test_record_recon_progress_from_findings():
+def test_record_recon_progress_only_on_root_surface():
     checklist = ReconChecklist()
-    finding = Finding(
-        path="http://hallbooking.srmrmp.edu.in",
-        hypothesis="headers",
-        provenance="hexstrike",
-        metadata={"capability": "web_behavior_analysis"},
+    base = "http://hallbooking.srmrmp.edu.in"
+    record_recon_progress(
+        checklist,
+        Finding(
+            path="http://hallbooking.srmrmp.edu.in/hall",
+            hypothesis="child path",
+            provenance="playwright_curl:baseline",
+            metadata={"capability": "web_behavior_analysis"},
+        ),
+        base_target=base,
     )
-    record_recon_progress(checklist, finding)
-    assert checklist.is_complete("hallbooking.srmrmp.edu.in") is False
+    assert checklist.done("hallbooking.srmrmp.edu.in") == []
+
+    record_recon_progress(
+        checklist,
+        Finding(
+            path="http://hallbooking.srmrmp.edu.in/",
+            hypothesis="root",
+            provenance="playwright_curl:baseline",
+            metadata={"capability": "web_behavior_analysis"},
+        ),
+        base_target=base,
+    )
     assert "web_behavior_analysis" in checklist.done("hallbooking.srmrmp.edu.in")
 
 
@@ -117,7 +157,7 @@ def test_findings_from_adapter_result_stamps_capability():
         findings=[
             {
                 "hypothesis": "baseline probe",
-                "path": "http://hallbooking.srmrmp.edu.in/hall",
+                "path": "http://hallbooking.srmrmp.edu.in/",
                 "provenance": "playwright_curl:baseline",
                 "metadata": {"status_code": 200},
             }
@@ -125,9 +165,19 @@ def test_findings_from_adapter_result_stamps_capability():
     )
     findings = _findings_from_adapter_result(
         result,
-        hypothesis=Hypothesis(path="http://hallbooking.srmrmp.edu.in/hall", reason="x", source_finding_id="y"),
+        hypothesis=Hypothesis(path="http://hallbooking.srmrmp.edu.in/", reason="x", source_finding_id="y"),
         parent_path_value=None,
         default_asset_type="web_endpoint",
         capability="web_behavior_analysis",
     )
     assert findings[0].metadata.get("capability") == "web_behavior_analysis"
+
+
+def test_queue_dedupes_same_path_and_intent():
+    queue = HypothesisQueue()
+    target = "http://hallbooking.srmrmp.edu.in"
+    meta = {"intent": "web_behavior_analysis", "asset_type": "web_endpoint"}
+    queue.add(Hypothesis(path=target, reason="first", source_finding_id="a", metadata=meta))
+    queue.add(Hypothesis(path=target, reason="second duplicate", source_finding_id="b", metadata=meta))
+    pending = [h for h in queue.pending_list() if h.metadata.get("intent") == "web_behavior_analysis"]
+    assert len(pending) == 1

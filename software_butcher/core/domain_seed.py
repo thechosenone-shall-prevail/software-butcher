@@ -7,8 +7,6 @@ from urllib.parse import urlsplit
 from software_butcher.core.assets import Asset
 from software_butcher.state.schema import Hypothesis
 
-from software_butcher.core.app_wordlists import build_context_path_hypotheses
-
 # Web assessment playbook — behavior and fingerprint before brute force / Nuclei.
 WEB_RECON_INTENTS: tuple[tuple[str, float, str], ...] = (
     ("web_behavior_analysis", 1.0, "Observe HTTP behavior, redirects, headers, and cookies."),
@@ -61,5 +59,4 @@ def build_domain_seed_hypotheses(
             )
         )
 
-    generated.extend(build_context_path_hypotheses(target, set()))
     return generated

@@ -135,5 +135,16 @@ def test_fresh_domain_project_seeds_osint(tmp_path):
     asset = project.add_asset(Asset(locator="example.com", asset_type="domain"))
     project.seed_asset(asset)
 
-    intents = {h.metadata["intent"] for h in project.findings.queue.pending_list()}
-    assert "web_behavior_analysis" in intents
+    pending = project.findings.queue.pending_list()
+    assert len(pending) == 3
+    intents = {h.metadata["intent"] for h in pending}
+    assert intents == {"web_behavior_analysis", "technology_fingerprint", "endpoint_discovery"}
+    assert all(h.path.rstrip("/") == "https://example.com" for h in pending)
+
+
+def test_hallbooking_seed_no_wordlist_spray():
+    asset = Asset(locator="http://hallbooking.srmrmp.edu.in", asset_type="web_endpoint")
+    hyps = build_domain_seed_hypotheses(asset)
+    assert len(hyps) == 3
+    paths = {h.path.rstrip("/") for h in hyps}
+    assert paths == {"http://hallbooking.srmrmp.edu.in"}

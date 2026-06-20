@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
-from software_butcher.core.url_utils import host_key
+from software_butcher.core.url_utils import base_web_url, host_key
 from software_butcher.state.schema import Finding
 
 REQUIRED_RECON_CAPABILITIES: tuple[str, ...] = (
@@ -13,6 +14,8 @@ REQUIRED_RECON_CAPABILITIES: tuple[str, ...] = (
     "technology_fingerprint",
     "endpoint_discovery",
 )
+
+HOST_LEVEL_RECON_CAPABILITIES = frozenset(REQUIRED_RECON_CAPABILITIES)
 
 EXPLOIT_SCAN_CAPABILITIES = frozenset(
     {
@@ -23,6 +26,12 @@ EXPLOIT_SCAN_CAPABILITIES = frozenset(
         "cms_scanning",
     }
 )
+
+
+def is_root_surface_url(url: str) -> bool:
+    """True when the URL is the web root (scheme://host with no path segment)."""
+    parsed = urlsplit(url.strip())
+    return bool(parsed.netloc) and not (parsed.path or "").strip("/")
 
 
 @dataclass
@@ -58,17 +67,34 @@ class ReconChecklist:
 
 
 def capability_from_finding(finding: Finding) -> str:
-    return str((finding.metadata or {}).get("capability", "")).lower()
+    capability = str((finding.metadata or {}).get("capability", "")).lower()
+    if capability:
+        return capability
+    if finding.provenance.startswith("playwright_curl"):
+        return "web_behavior_analysis"
+    return ""
 
 
-def record_recon_progress(checklist: ReconChecklist, finding: Finding) -> None:
+def record_recon_progress(
+    checklist: ReconChecklist,
+    finding: Finding,
+    *,
+    base_target: str = "",
+) -> None:
     capability = capability_from_finding(finding)
     if not capability:
         return
+
+    host = host_key(finding.path)
+    if capability in HOST_LEVEL_RECON_CAPABILITIES:
+        root = base_web_url(base_target or finding.path).rstrip("/")
+        if finding.path.rstrip("/").lower() != root.lower() and not is_root_surface_url(finding.path):
+            return
+
     if capability in REQUIRED_RECON_CAPABILITIES or capability == "directory_bruteforce":
-        checklist.mark(host_key(finding.path), capability)
-        if capability == "directory_bruteforce" and "endpoint_discovery" not in checklist.done(host_key(finding.path)):
-            checklist.mark(host_key(finding.path), "endpoint_discovery")
+        checklist.mark(host, capability)
+        if capability == "directory_bruteforce" and "endpoint_discovery" not in checklist.done(host):
+            checklist.mark(host, "endpoint_discovery")
 
 
 def recon_allows_capability(checklist: ReconChecklist, host: str, capability: str) -> bool:
