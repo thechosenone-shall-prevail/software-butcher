@@ -104,3 +104,30 @@ def test_record_recon_progress_from_findings():
     record_recon_progress(checklist, finding)
     assert checklist.is_complete("hallbooking.srmrmp.edu.in") is False
     assert "web_behavior_analysis" in checklist.done("hallbooking.srmrmp.edu.in")
+
+
+def test_findings_from_adapter_result_stamps_capability():
+    from software_butcher.brain.loop import _findings_from_adapter_result
+    from software_butcher.core.adapter import AdapterResult
+
+    result = AdapterResult(
+        adapter="playwright_curl",
+        success=True,
+        summary="ok",
+        findings=[
+            {
+                "hypothesis": "baseline probe",
+                "path": "http://hallbooking.srmrmp.edu.in/hall",
+                "provenance": "playwright_curl:baseline",
+                "metadata": {"status_code": 200},
+            }
+        ],
+    )
+    findings = _findings_from_adapter_result(
+        result,
+        hypothesis=Hypothesis(path="http://hallbooking.srmrmp.edu.in/hall", reason="x", source_finding_id="y"),
+        parent_path_value=None,
+        default_asset_type="web_endpoint",
+        capability="web_behavior_analysis",
+    )
+    assert findings[0].metadata.get("capability") == "web_behavior_analysis"

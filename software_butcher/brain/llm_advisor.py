@@ -8,9 +8,12 @@ the queue falls back to its default priority-sorted ordering.
 from __future__ import annotations
 
 import os
+import sys
 from typing import TYPE_CHECKING, Any
 
 import requests
+
+from software_butcher.brain.prompts import ADVISOR_HYPOTHESIS_PROMPT
 
 if TYPE_CHECKING:
     from software_butcher.state.schema import Finding, Hypothesis
@@ -19,16 +22,9 @@ OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
 DEFAULT_OPENROUTER_MODEL = "gpt-oss-120b"
 OPENROUTER_TIMEOUT = 12
+OPENROUTER_CONNECT_TIMEOUT = 3
 
-SYSTEM_PROMPT = """You are a security testing advisor.
-You will receive a list of pending hypotheses and recent findings from an automated pentest tool.
-Your job is to select the single hypothesis most likely to produce a *confirmed* security finding.
-
-Rules:
-- Prefer paths that haven't been tested yet over paths already in the findings list.
-- Prefer explicit auth/admin paths over generic discovery paths.
-- Prefer confirmed-parent paths (where a child finding already confirmed something).
-- Output ONLY the hypothesis id string (e.g. hyp-abc123), nothing else."""
+SYSTEM_PROMPT = ADVISOR_HYPOTHESIS_PROMPT
 
 
 class OpenRouterAdvisor:
@@ -36,17 +32,22 @@ class OpenRouterAdvisor:
 
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or os.environ.get(OPENROUTER_API_KEY_ENV, "")
-        self.api_url = os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_API_URL)
+        base = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+        if base.endswith("/chat/completions"):
+            self.api_url = base
+        else:
+            self.api_url = f"{base}/chat/completions"
         self.model = os.environ.get("LLM_MODEL") or os.environ.get("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL
         self.timeout = int(os.environ.get("OPENROUTER_TIMEOUT", OPENROUTER_TIMEOUT))
         self.enabled = bool(self.api_key)
+        self._connectivity_failed = False
 
     def select_hypothesis_id(
         self,
         pending: list["Hypothesis"],
         findings: list["Finding"],
     ) -> str | None:
-        if not self.enabled or not pending:
+        if not self.enabled or not pending or self._connectivity_failed:
             return None
 
         try:
@@ -66,15 +67,20 @@ class OpenRouterAdvisor:
                     "temperature": 0.0,
                     "max_tokens": 32,
                 },
-                timeout=self.timeout,
+                timeout=(OPENROUTER_CONNECT_TIMEOUT, self.timeout),
             )
             response.raise_for_status()
             raw_answer = response.json()["choices"][0]["message"]["content"].strip()
             valid_ids = {h.id for h in pending}
             if raw_answer in valid_ids:
                 return raw_answer
-        except Exception:
-            pass
+        except Exception as exc:
+            self._connectivity_failed = True
+            sys.stderr.write(
+                f"[Advisor] OpenRouter unreachable ({exc}); "
+                f"using queue priority for rest of run. "
+                f"Fix with: python3 -m software_butcher llm-doctor\n"
+            )
         return None
 
     @staticmethod

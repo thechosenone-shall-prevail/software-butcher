@@ -30,3 +30,14 @@ def test_doctor_runs():
     )
     assert result.returncode == 0
     assert "hexstrike" in result.stdout.lower() or "MISS" in result.stdout or "OK" in result.stdout
+
+
+def test_llm_doctor_runs():
+    result = subprocess.run(
+        [sys.executable, "-m", "software_butcher", "llm-doctor", "--no-chat"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "OpenRouter LLM diagnostics" in result.stdout or "OpenRouter LLM diagnostics" in result.stderr

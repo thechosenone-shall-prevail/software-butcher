@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 from software_butcher.brain.context import build_brain_context
+from software_butcher.brain.prompts import BRAIN_CAPABILITY_PROMPT
 from software_butcher.brain.guards import LoopGuard
 from software_butcher.brain.hypotheses import HypothesisGenerator
 from software_butcher.brain.llm_advisor import OpenRouterAdvisor
@@ -23,84 +24,8 @@ from software_butcher.state.path_graph import parent_path as compute_parent_path
 from software_butcher.state.schema import Finding
 from software_butcher.state.store import FindingStore
 
-BRAIN_SYSTEM_PROMPT = """
-You are the reasoning engine of Software Butcher, an autonomous security assessment platform
-designed to compete with state-of-the-art AI pentesting systems like XBOW.
-
-Your job: Read the current finding state and current hypothesis. Decide what 
-capability (tool/technique) would maximize information gain on this hypothesis.
-
-Available capabilities on the Shelf:
-
-DISCOVERY & RECONNAISSANCE:
-- endpoint_discovery: ffuf, gobuster, dirsearch for path enumeration
-- port_scanning: nmap, masscan, rustscan for port/service discovery
-- directory_bruteforce: gobuster, ffuf, feroxbuster for directory brute forcing
-- technology_fingerprint: AI technology stack detection and fingerprinting
-- authenticated_discovery: discovery as logged-in user with session cookies
-
-WEB VULNERABILITY SCANNING:
-- vulnerability_scanning: nuclei, nikto for known vulnerability detection
-- sql_injection_probing: SQLMap for SQL injection detection and exploitation
-- xss_scanning: XSS detection and payload testing
-- cms_scanning: WPScan for CMS-specific vulnerability scanning (WordPress, Joomla, etc.)
-- web_behavior_analysis: HTTP behavior, redirects, content-type analysis via browser
-
-API SECURITY:
-- api_enumeration: API endpoint discovery and parameter fuzzing
-- api_fuzzing: API fuzzer, GraphQL scanner, JWT analyzer for API security testing
-
-CREDENTIAL ATTACKS:
-- credential_attack: Hydra brute force, hashcat/john password cracking
-
-BINARY & REVERSE ENGINEERING:
-- binary_analysis: GDB, radare2, ghidra, binwalk binary analysis via server
-- binary_triage: entropy, strings, symbols analysis (local)
-
-EXPLOIT & POST-EXPLOITATION:
-- exploit_generation: Metasploit module selection, msfvenom payload generation
-- shell_command_execution: Run commands in established shell sessions (Metasploit, Sliver, SSH)
-- oss_fuzzing: deep fuzzing via BOAZ/OSS-Fuzz
-- payload_evasion: BOAZ evasive payload generation (77+ loaders, 12 encoders)
-- c2_deployment: deploy Sliver C2 beacons for post-exploitation
-
-CLOUD & CONTAINER:
-- cloud_security_audit: Prowler, ScoutSuite, Trivy for cloud security auditing
-- container_security: kube-hunter, docker-bench, Trivy for container scanning
-- iac_scanning: Checkov, Terrascan for infrastructure-as-code scanning
-- cloud_attack_simulation: Stratus Red Team controlled attack simulation
-
-ADVERSARY EMULATION:
-- adversary_emulation: CALDERA ATT&CK-based adversary operations
-- ttp_validation: Atomic Red Team ATT&CK technique validation
-
-AD / INTERNAL NETWORK:
-- ad_enumeration: enum4linux, smbmap, netexec, responder for AD enumeration
-
-AI-DRIVEN WORKFLOWS:
-- ai_attack_chain: AI-powered attack chain discovery and orchestration
-- bugbounty_recon: automated bug bounty reconnaissance workflow
-- bugbounty_comprehensive: full automated bug bounty assessment
-
-STRATEGY GUIDELINES:
-1. For unknown web targets: web_behavior_analysis → technology_fingerprint → endpoint_discovery BEFORE any Nuclei/vuln scan
-2. Never run vulnerability_scanning until headers, stack, and path mapping are complete
-3. Use SQL injection, XSS, or API fuzzing when evidence suggests those surfaces
-4. Use credential attacks when login forms or hashes are found
-5. Use exploit generation when CVEs or known vulns are confirmed (not merely hypothesized)
-6. Use cloud/container tools when cloud infrastructure is detected
-7. Use AD enumeration when SMB/LDAP/Kerberos services are found
-8. Prefer the capability that produces the HIGHEST confidence findings
-9. Respect engagement phase: recon → exploit → foothold → privesc → exfil
-10. In validation_mode (high convergence), prefer confirmation over new discovery — but still no Nuclei if recon checklist is incomplete
-
-Respond ONLY as JSON:
-{
-  "capability": "capability_name",
-  "reasoning": "why this maximizes information gain",
-  "target_aspect": "what aspect of the target we're exploring"
-}
-"""
+# Re-export for tests that import BRAIN_SYSTEM_PROMPT
+BRAIN_SYSTEM_PROMPT = BRAIN_CAPABILITY_PROMPT
 
 # Mapping from intent to default adapter used when hypothesis metadata overrides policy
 _INTENT_ADAPTER_MAP: dict[str, str] = {
@@ -209,9 +134,17 @@ def _findings_from_adapter_result(
     parent_path_value: str | None,
     default_asset_type: str,
     branch_id: str | None = None,
+    capability: str | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     for item in result.findings:
+        item_meta = dict(item.get("metadata", {}))
+        if capability and "capability" not in item_meta and "capability" not in item:
+            item_meta["capability"] = capability
+        if item.get("capability"):
+            item_meta["capability"] = item["capability"]
+        if branch_id:
+            item_meta["branch_id"] = branch_id
         findings.append(
             Finding(
                 hypothesis=item.get("hypothesis", hypothesis.reason),
@@ -222,11 +155,16 @@ def _findings_from_adapter_result(
                 confidence=float(item.get("confidence", 0.5 if result.success else 0.3)),
                 parent_path=item.get("parent_path") or parent_path_value,
                 asset_type=item.get("asset_type", default_asset_type),
-                metadata={**item.get("metadata", {}), **({"capability": item["capability"]} if item.get("capability") else {}), **({"branch_id": branch_id} if branch_id else {})},
+                metadata=item_meta,
             )
         )
 
     if not findings:
+        meta: dict[str, Any] = {}
+        if capability:
+            meta["capability"] = capability
+        if branch_id:
+            meta["branch_id"] = branch_id
         findings.append(
             Finding(
                 hypothesis=hypothesis.reason,
@@ -237,6 +175,7 @@ def _findings_from_adapter_result(
                 confidence=0.5 if result.success else 0.3,
                 parent_path=parent_path_value,
                 asset_type=default_asset_type,
+                metadata=meta,
             )
         )
     return findings
@@ -340,7 +279,8 @@ def run_brain_once(
 
     # LLM-DRIVEN REASONING (Phase 2) — OpenRouter capability selector
     decision = None
-    if llm_client is not None and isinstance(registry, AdapterRegistry):
+    llm_disabled = getattr(store, "_llm_connectivity_failed", False)
+    if llm_client is not None and isinstance(registry, AdapterRegistry) and not llm_disabled:
         context = build_brain_context(
             list(store.findings.values()),
             store.engagement,
@@ -358,7 +298,7 @@ def run_brain_once(
                 model=model_name,
                 messages=[{
                     "role": "system",
-                    "content": BRAIN_SYSTEM_PROMPT
+                    "content": BRAIN_CAPABILITY_PROMPT
                 }, {
                     "role": "user",
                     "content": (
@@ -397,7 +337,12 @@ def run_brain_once(
         except Exception as exc:
             # LLM failure should never crash the Brain loop — fall through
             # to deterministic policy
-            sys.stderr.write(f"[Brain] LLM call failed: {exc}. Falling back to policy.\n")
+            store._llm_connectivity_failed = True
+            sys.stderr.write(
+                f"[Brain] LLM call failed: {exc}. "
+                f"Policy-only mode for rest of run. "
+                f"Diagnose: python3 -m software_butcher llm-doctor\n"
+            )
             decision = None
 
     if decision is None and explicit_intent:
@@ -490,6 +435,7 @@ def run_brain_once(
             parent_path_value,
             decision.asset.asset_type,
             branch_id=branch_id,
+            capability=str((decision.options or {}).get("capability") or decision.intent or ""),
         ):
             if _ingest_finding(store, finding, branch_id, on_finding_ingested):
                 for generated in hypothesis_generator.generate(finding):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
@@ -13,7 +14,7 @@ from software_butcher.brain.llm_advisor import OpenRouterAdvisor
 from software_butcher.core.classifier import classify_target
 from software_butcher.core.framework_config import FrameworkConfigSet
 from software_butcher.core.health import FrameworkHealth
-from software_butcher.core.llm import create_openrouter_client
+from software_butcher.core.llm import create_openrouter_client, diagnose_openrouter, format_diagnosis
 from software_butcher.core.scope import Scope
 from software_butcher.project import ButcherProject
 from software_butcher.state.store import FindingStore
@@ -69,6 +70,17 @@ def main() -> None:
     synth_parser.add_argument("--state", required=True, help="Path to finding_state.json")
     synth_parser.add_argument("--json", action="store_true")
 
+    llm_doctor_parser = subparsers.add_parser(
+        "llm-doctor",
+        help="Diagnose OpenRouter API key, DNS, and model connectivity",
+    )
+    llm_doctor_parser.add_argument("--json", action="store_true", help="Emit JSON output")
+    llm_doctor_parser.add_argument(
+        "--no-chat",
+        action="store_true",
+        help="Skip the live chat completion probe (faster; checks DNS/auth only)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "doctor":
@@ -119,6 +131,20 @@ def main() -> None:
         llm_client = create_openrouter_client()
         advisor = OpenRouterAdvisor()
 
+        if llm_client is None:
+            print(
+                "Warning: OPENROUTER_API_KEY not set or openai package missing — Brain runs in policy-only mode.",
+                file=sys.stderr,
+            )
+        else:
+            probe = diagnose_openrouter(probe_chat=False)
+            if not any(c.get("name") == "http" and c.get("ok") for c in probe.get("checks", [])):
+                print(
+                    f"Warning: OpenRouter not reachable ({probe.get('summary')}). "
+                    "Run: python3 -m software_butcher llm-doctor",
+                    file=sys.stderr,
+                )
+
         brain = BrainLoop(
             project.findings,
             scope=scope,
@@ -157,6 +183,17 @@ def main() -> None:
                 print(f"Event: {event['status']}")
             print(f"State written to {Path(args.workspace) / 'finding_state.json'}")
             print(f"Verdict: {report.verdict.name} — {report.verdict.summary}")
+        return
+
+    if args.command == "llm-doctor":
+        _load_dotenv()
+        report = diagnose_openrouter(probe_chat=not args.no_chat)
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(format_diagnosis(report))
+            if not report.get("ok"):
+                raise SystemExit(1)
         return
 
     if args.command == "bootstrap-frameworks":
