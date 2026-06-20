@@ -75,6 +75,15 @@ def capability_from_finding(finding: Finding) -> str:
     return ""
 
 
+def mark_host_recon(checklist: ReconChecklist, base_target: str, capability: str) -> None:
+    """Record that a host-level recon capability actually executed."""
+    if capability not in HOST_LEVEL_RECON_CAPABILITIES:
+        return
+    checklist.mark(host_key(base_target), capability)
+    if capability == "directory_bruteforce":
+        checklist.mark(host_key(base_target), "endpoint_discovery")
+
+
 def record_recon_progress(
     checklist: ReconChecklist,
     finding: Finding,

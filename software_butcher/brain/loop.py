@@ -17,9 +17,10 @@ from software_butcher.core.assets import Asset
 from software_butcher.core.registry import DEFAULT_REGISTRY, AdapterRegistry, Registry, default_registry
 from software_butcher.core.router import AssetRouter, RouteDecision
 from software_butcher.core.runner import SafeRunner
+from software_butcher.core.recon_seed import ensure_host_recon_hypothesis, next_recon_hypothesis
 from software_butcher.core.scope import Scope
 from software_butcher.core.url_utils import base_web_url, host_key
-from software_butcher.state.recon_checklist import HOST_LEVEL_RECON_CAPABILITIES
+from software_butcher.state.recon_checklist import HOST_LEVEL_RECON_CAPABILITIES, mark_host_recon
 from software_butcher.shelves.hexstrike.client import HexstrikeServerUnavailableError
 from software_butcher.state.path_graph import parent_path as compute_parent_path
 from software_butcher.state.schema import Finding
@@ -290,7 +291,10 @@ def run_brain_once(
         if chosen_id:
             hypothesis = store.queue.next_by_id(chosen_id)
     if hypothesis is None:
-        hypothesis = store.queue.next()
+        hypothesis = next_recon_hypothesis(store) or store.queue.next()
+    if not hypothesis:
+        if ensure_host_recon_hypothesis(store):
+            hypothesis = next_recon_hypothesis(store) or store.queue.next()
     if not hypothesis:
         return None
 
@@ -442,6 +446,9 @@ def run_brain_once(
                 store.save_or_log()
                 return None
             result = adapter.execute(plan)
+            executed_cap = str((decision.options or {}).get("capability") or decision.intent or "")
+            if result.success and store.base_target and executed_cap in HOST_LEVEL_RECON_CAPABILITIES:
+                mark_host_recon(store.recon_checklist, store.base_target, executed_cap)
         except HexstrikeServerUnavailableError as exc:
             # Server is down — record a finding so the run doesn't crash and
             # the user knows why no results were produced for this hypothesis.
@@ -627,6 +634,8 @@ class BrainLoop:
                     recon_complete=recon_ok,
                 )
                 branch_count = min(branch_count, self.max_branches)
+                if not recon_ok:
+                    branch_count = 1
             else:
                 branch_count, pcs_reason = self.max_branches, "fixed_branch_count"
 
@@ -647,6 +656,10 @@ class BrainLoop:
             events.extend(wave_events)
 
             if all(event.get("status") == "idle" for event in wave_events):
+                recon_host = host_key((asset.locator if asset else "") or self.store.base_target)
+                if recon_host and not self.store.recon_complete_for(recon_host):
+                    if ensure_host_recon_hypothesis(self.store):
+                        continue
                 break
 
             new_ids = set(self.store.findings.keys()) - before_ids

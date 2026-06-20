@@ -70,17 +70,21 @@ class OpenRouterAdvisor:
                 timeout=(OPENROUTER_CONNECT_TIMEOUT, self.timeout),
             )
             response.raise_for_status()
-            raw_answer = response.json()["choices"][0]["message"]["content"].strip()
+            payload = response.json()
+            message = payload.get("choices", [{}])[0].get("message") or {}
+            raw_answer = str(message.get("content") or "").strip()
             valid_ids = {h.id for h in pending}
             if raw_answer in valid_ids:
                 return raw_answer
-        except Exception as exc:
+        except requests.RequestException as exc:
             self._connectivity_failed = True
             sys.stderr.write(
                 f"[Advisor] OpenRouter unreachable ({exc}); "
                 f"using queue priority for rest of run. "
                 f"Fix with: python3 -m software_butcher llm-doctor\n"
             )
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            sys.stderr.write(f"[Advisor] OpenRouter response parse failed ({exc}); using queue priority.\n")
         return None
 
     @staticmethod

@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from software_butcher.core.assets import AssetInventory
+from software_butcher.core.url_utils import host_key
 from software_butcher.state.schema import Finding
 from software_butcher.state.store import FindingStore
 from software_butcher.synthesis.lanes import AssessmentLane, build_assessment_lanes, lane_overview_markdown
@@ -149,6 +150,22 @@ Rules for 'reproduction_steps' and 'fixes':
                 name="secure",
                 summary="No exploitable path was found because no findings were recorded in the current run.",
             )
+
+        if store.base_target:
+            remaining = [
+                cap
+                for cap in ("web_behavior_analysis", "technology_fingerprint", "endpoint_discovery")
+                if cap not in store.recon_checklist.done(host_key(store.base_target))
+            ]
+            if remaining:
+                return Verdict(
+                    name="partially_hardened",
+                    summary=(
+                        f"Assessment incomplete — host recon not finished "
+                        f"(missing: {', '.join(remaining)}). No secure verdict yet."
+                    ),
+                    cited_findings=[finding.id for finding in findings[:5]],
+                )
 
         active = [finding for finding in findings if finding.status != "dismissed"]
         interactive = [f for f in active if f.asset_type != "static_asset"]
