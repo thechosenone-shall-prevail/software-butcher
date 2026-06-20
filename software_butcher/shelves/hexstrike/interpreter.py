@@ -6,6 +6,7 @@ import re
 from urllib.parse import urljoin, urlsplit
 
 from software_butcher.core.asset_classifier import classify_url_asset_type, is_static_asset
+from software_butcher.core.url_utils import resolve_tool_path, same_origin
 
 
 class HexStrikeInterpreter:
@@ -46,6 +47,8 @@ class HexStrikeInterpreter:
         urls = sorted(set(self.URL_RE.findall(text)))
         for url in urls[:25]:
             clean_url = url.rstrip(".,;")
+            if not same_origin(clean_url, target):
+                continue
             findings.append(
                 {
                     "hypothesis": "URL discovered during HexStrike discovery.",
@@ -61,8 +64,11 @@ class HexStrikeInterpreter:
         paths = sorted(path for path in set(self.PATH_RE.findall(text)) if len(path) > 1)
         for path in paths[:25]:
             clean_path = path.rstrip(".,;")
+            resolved = resolve_tool_path(target, clean_path)
+            if not resolved:
+                continue
             default_type = "web_endpoint" if asset_type != "api" else "api"
-            classified_type = classify_url_asset_type(clean_path, default_type)
+            classified_type = classify_url_asset_type(resolved, default_type)
             # Skip static assets entirely — /login.css, /img/logo.png etc. have no
             # security-relevant signals worth escalating and their presence in the
             # store would generate spurious parent-path hypotheses (BUG-6).
@@ -71,11 +77,11 @@ class HexStrikeInterpreter:
             findings.append(
                 {
                     "hypothesis": "Web path discovered during HexStrike discovery.",
-                    "path": clean_path,
+                    "path": resolved,
                     "provenance": f"hexstrike:{tool}:path",
                     "status": "hypothesis",
                     "confidence": 0.4,
-                    "evidence": [path],
+                    "evidence": [path, resolved],
                     "asset_type": classified_type,
                 }
             )

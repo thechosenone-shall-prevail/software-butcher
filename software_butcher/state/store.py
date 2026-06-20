@@ -13,9 +13,11 @@ from .convergence import apply_cluster_stats, cluster_theme, detect_flags, recom
 from .engagement import EngagementState, infer_phase, phase_hypotheses
 from .hypothesis_queue import HypothesisQueue
 from .pcs import PCSState, ProgressiveConvergenceSearch
+from .recon_checklist import ReconChecklist, record_recon_progress
 from .schema import ConvergenceCluster, Finding, Hypothesis, SCHEMA_VERSION
 from .session_state import SessionStore
 from software_butcher.brain.confirmation import process_finding
+from software_butcher.core.url_utils import canonical_web_url, host_key
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ class FindingStore:
         self.queue._lock = self._lock
         self.engagement = EngagementState()
         self.pcs = ProgressiveConvergenceSearch()
+        self.recon_checklist = ReconChecklist()
         self.clusters: dict[str, ConvergenceCluster] = {}
         self._base_target: str = ""
 
@@ -63,6 +66,7 @@ class FindingStore:
 
             finding.cluster_theme = cluster_theme(finding)
             finding = process_finding(finding)
+            finding = self._normalize_finding_path(finding)
 
             # Flag detection enriches engagement
             for flag in detect_flags(" ".join(finding.evidence) + " " + finding.hypothesis):
@@ -73,6 +77,7 @@ class FindingStore:
             if not added:
                 return False
 
+            record_recon_progress(self.recon_checklist, finding)
             self._recompute_state_unlocked()
             return True
 
@@ -85,8 +90,16 @@ class FindingStore:
             return False
         self.findings[finding.id] = finding
         self._finding_keys.add(key)
-        self.queue.add_from_finding(finding)
+        self.queue.add_from_finding(finding, self._base_target)
         return True
+
+    def _normalize_finding_path(self, finding: Finding) -> Finding:
+        if not self._base_target:
+            return finding
+        canonical = canonical_web_url(finding.path, self._base_target)
+        if canonical:
+            finding.path = canonical
+        return finding
 
     def _recompute_state_unlocked(self) -> None:
         self.clusters = recompute_clusters(self.findings.values())
@@ -98,11 +111,15 @@ class FindingStore:
 
         if self._base_target:
             for hyp in phase_hypotheses(self.engagement, self._base_target, self.session_store):
-                self.queue.add(hyp)
+                self.queue.add(hyp, self._base_target)
 
     def add_hypothesis(self, hypothesis: Hypothesis) -> None:
         with self._lock:
-            self.queue.add(hypothesis)
+            self.queue.add(hypothesis, self._base_target)
+
+    def recon_complete_for(self, path_or_url: str) -> bool:
+        with self._lock:
+            return self.recon_checklist.is_complete(host_key(path_or_url))
 
     def new_branch_id(self) -> str:
         return f"branch-{uuid4().hex[:8]}"
@@ -121,6 +138,7 @@ class FindingStore:
                 "tool_calls": self.tool_calls,
                 "engagement": self.engagement.to_dict(),
                 "pcs": self.pcs.state.to_dict(),
+                "recon": self.recon_checklist.to_dict(),
                 "clusters": {k: v.to_dict() for k, v in self.clusters.items()},
             }
             self.path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -142,6 +160,7 @@ class FindingStore:
                 "tool_calls": self.tool_calls,
                 "engagement": self.engagement.to_dict(),
                 "pcs": self.pcs.state.to_dict(),
+                "recon": self.recon_checklist.to_dict(),
                 "clusters": {k: v.to_dict() for k, v in self.clusters.items()},
             }
 
@@ -156,6 +175,7 @@ class FindingStore:
         store.tool_calls = int(payload.get("tool_calls") or 0)
         store.engagement = EngagementState.from_dict(payload.get("engagement", {}))
         store.pcs = ProgressiveConvergenceSearch(PCSState.from_dict(payload.get("pcs", {})))
+        store.recon_checklist = ReconChecklist.from_dict(payload.get("recon", {}))
 
         for theme, data in payload.get("clusters", {}).items():
             store.clusters[theme] = ConvergenceCluster.from_dict({**data, "theme": theme})

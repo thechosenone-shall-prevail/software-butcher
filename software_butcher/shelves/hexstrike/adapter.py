@@ -294,13 +294,19 @@ class HexstrikeAdapter:
                 return self.client.run_api_fuzzer(target, **safe_opts)
             except Exception as exc:
                 return {"error": str(exc), "success": False}
-        # endpoint_discovery runs gobuster to find unlinked paths (e.g. /hall)
-        # in addition to the HTML crawl that already runs in _execute_plan.
+        # endpoint_discovery runs a multi-tool bundle so paths like /hall are not missed.
         if capability == "endpoint_discovery":
-            try:
-                return self.client.run_gobuster(target)
-            except Exception as exc:
-                return {"error": str(exc), "success": False}
+            bundle: dict[str, Any] = {}
+            for tool_name, runner in (
+                ("gobuster", lambda: self.client.run_gobuster(target)),
+                ("ffuf", lambda: self.client.run_ffuf(target)),
+                ("katana", lambda: self.client.run_katana(target)),
+            ):
+                try:
+                    bundle[tool_name] = runner()
+                except Exception as exc:
+                    bundle[tool_name] = {"error": str(exc), "success": False}
+            return {"success": True, "bundle": "endpoint_discovery", "responses": bundle}
 
         # Filter out internal keys that shouldn't be sent to the server
         safe_opts = {k: v for k, v in options.items()

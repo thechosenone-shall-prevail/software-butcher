@@ -7,11 +7,13 @@ from urllib.parse import urlsplit
 from software_butcher.core.assets import Asset
 from software_butcher.state.schema import Hypothesis
 
-# Ordered by priority — recon breadth before deep endpoint brute force.
-DOMAIN_OSINT_INTENTS: tuple[tuple[str, float, str], ...] = (
-    ("bugbounty_recon", 1.0, "Company/domain OSINT — subdomain and asset discovery."),
-    ("technology_fingerprint", 0.96, "Fingerprint technology stack on primary domain surface."),
-    ("endpoint_discovery", 0.92, "Enumerate web paths on primary domain surface."),
+from software_butcher.core.app_wordlists import build_context_path_hypotheses
+
+# Web assessment playbook — behavior and fingerprint before brute force / Nuclei.
+WEB_RECON_INTENTS: tuple[tuple[str, float, str], ...] = (
+    ("web_behavior_analysis", 1.0, "Observe HTTP behavior, redirects, headers, and cookies."),
+    ("technology_fingerprint", 0.97, "Fingerprint web server, CMS, and application stack."),
+    ("endpoint_discovery", 0.94, "Map paths with gobuster, ffuf, and crawler-assisted wordlists."),
 )
 
 
@@ -39,26 +41,11 @@ def build_domain_seed_hypotheses(
     reason: str = "Initial target supplied by user",
 ) -> list[Hypothesis]:
     """Build OSINT-first hypotheses for a domain or bare web root target."""
-    if not is_domain_like(asset):
-        return [
-            Hypothesis(
-                path=asset.locator,
-                reason=reason,
-                source_finding_id="manual-seed",
-                priority=1.0,
-                metadata={
-                    "asset_type": asset.asset_type,
-                    "intent": "endpoint_discovery",
-                    "generated_by": "domain_seed",
-                },
-            )
-        ]
-
-    target = primary_web_url(asset)
-    asset_type = "web_endpoint" if asset.asset_type == "domain" else asset.asset_type
+    target = primary_web_url(asset) if is_domain_like(asset) else asset.locator.rstrip("/")
+    asset_type = "web_endpoint" if asset.asset_type in {"domain", "web_endpoint"} else asset.asset_type
     generated: list[Hypothesis] = []
 
-    for intent, priority, seed_reason in DOMAIN_OSINT_INTENTS:
+    for intent, priority, seed_reason in WEB_RECON_INTENTS:
         generated.append(
             Hypothesis(
                 path=target,
@@ -74,4 +61,5 @@ def build_domain_seed_hypotheses(
             )
         )
 
+    generated.extend(build_context_path_hypotheses(target, set()))
     return generated

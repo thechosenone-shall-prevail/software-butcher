@@ -203,6 +203,14 @@ class BrainPolicy:
                     preferred_adapter="hexstrike",
                     reason="User supplied an IaC config; start with Checkov/Terrascan scanning.",
                 )
+            if asset.asset_type in {"web_endpoint", "api", "domain"}:
+                return PolicyDecision(
+                    intent="web_behavior_analysis",
+                    asset=asset,
+                    preferred_adapter="playwright_curl",
+                    reason="No evidence yet; start with HTTP behavior and header analysis.",
+                    options={"capability": "web_behavior_analysis"},
+                )
             return PolicyDecision(
                 intent="discover",
                 asset=asset,

@@ -29,12 +29,21 @@ PRIVESC_SIGNALS = (
     "nt authority\\system",
 )
 EXPLOIT_SIGNALS = (
-    "confirmed",
     "exploit",
     "cve-",
     "vulnerability_confirmed",
     "auth_bypass",
     "sql injection",
+)
+
+EXPLOIT_CONFIRM_CAPABILITIES = frozenset(
+    {
+        "vulnerability_confirmed",
+        "exploit_generation",
+        "auth_bypass_confirmed",
+        "sql_injection_probing",
+        "rce",
+    }
 )
 
 
@@ -73,6 +82,13 @@ def _text(findings: Iterable[Finding]) -> str:
     return "\n".join(chunks).lower()
 
 
+def _confirmed_exploit(finding: Finding) -> bool:
+    if finding.status != "confirmed":
+        return False
+    capability = str((finding.metadata or {}).get("capability", "")).lower()
+    return capability in EXPLOIT_CONFIRM_CAPABILITIES
+
+
 def infer_phase(findings: list[Finding], state: EngagementState) -> EngagementState:
     """Update engagement phase from finding evidence."""
     text = _text(findings)
@@ -95,7 +111,7 @@ def infer_phase(findings: list[Finding], state: EngagementState) -> EngagementSt
         state.phase = "privesc"
     elif any(signal in text for signal in FOOTHOLD_SIGNALS):
         state.phase = "foothold"
-    elif any(f.status == "confirmed" for f in findings) or any(signal in text for signal in EXPLOIT_SIGNALS):
+    elif any(_confirmed_exploit(f) for f in findings) or any(signal in text for signal in EXPLOIT_SIGNALS):
         state.phase = "exploit"
     else:
         state.phase = "recon"

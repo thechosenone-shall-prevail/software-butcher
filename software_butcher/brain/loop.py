@@ -17,6 +17,7 @@ from software_butcher.core.registry import DEFAULT_REGISTRY, AdapterRegistry, Re
 from software_butcher.core.router import AssetRouter, RouteDecision
 from software_butcher.core.runner import SafeRunner
 from software_butcher.core.scope import Scope
+from software_butcher.core.url_utils import host_key
 from software_butcher.shelves.hexstrike.client import HexstrikeServerUnavailableError
 from software_butcher.state.path_graph import parent_path as compute_parent_path
 from software_butcher.state.schema import Finding
@@ -82,16 +83,16 @@ AI-DRIVEN WORKFLOWS:
 - bugbounty_comprehensive: full automated bug bounty assessment
 
 STRATEGY GUIDELINES:
-1. Start with discovery/reconnaissance for unknown targets
-2. Escalate to vulnerability scanning once endpoints are found
+1. For unknown web targets: web_behavior_analysis → technology_fingerprint → endpoint_discovery BEFORE any Nuclei/vuln scan
+2. Never run vulnerability_scanning until headers, stack, and path mapping are complete
 3. Use SQL injection, XSS, or API fuzzing when evidence suggests those surfaces
 4. Use credential attacks when login forms or hashes are found
-5. Use exploit generation when CVEs or known vulns are confirmed
+5. Use exploit generation when CVEs or known vulns are confirmed (not merely hypothesized)
 6. Use cloud/container tools when cloud infrastructure is detected
 7. Use AD enumeration when SMB/LDAP/Kerberos services are found
 8. Prefer the capability that produces the HIGHEST confidence findings
 9. Respect engagement phase: recon → exploit → foothold → privesc → exfil
-10. In validation_mode (high convergence), prefer confirmation over new discovery
+10. In validation_mode (high convergence), prefer confirmation over new discovery — but still no Nuclei if recon checklist is incomplete
 
 Respond ONLY as JSON:
 {
@@ -164,6 +165,41 @@ def _route_for_decision(decision, router: AssetRouter) -> RouteDecision:
         shelf=route.shelf,
         adapter=decision.preferred_adapter,
         reason=decision.reason,
+    )
+
+
+def _apply_recon_gate(
+    store: FindingStore,
+    hypothesis,
+    decision: PolicyDecision,
+    explicit_intent: str | None,
+) -> PolicyDecision:
+    """Block exploit scanners until the per-host recon checklist is complete."""
+    if decision.asset.asset_type not in {"web_endpoint", "api", "domain", "unknown"}:
+        return decision
+
+    host = host_key(hypothesis.path)
+    if store.recon_checklist.is_complete(host):
+        return decision
+
+    missing = store.recon_checklist.next_missing(host)
+    if not missing:
+        return decision
+
+    chosen = str((decision.options or {}).get("capability") or decision.intent or explicit_intent or "")
+    if chosen == missing or explicit_intent == missing:
+        return decision
+
+    preferred = _INTENT_ADAPTER_MAP.get(missing, "hexstrike")
+    sys.stderr.write(
+        f"[Brain] Recon gate on {host}: forcing {missing} before {chosen or 'exploit scanning'}\n"
+    )
+    return PolicyDecision(
+        intent=missing,
+        asset=decision.asset,
+        preferred_adapter=preferred,
+        reason=f"Recon checklist incomplete for {host}; run {missing} before {chosen or 'exploit scanning'}.",
+        options={"capability": missing},
     )
 
 
@@ -378,6 +414,8 @@ def run_brain_once(
         )
     elif decision is None:
         decision = policy.decide(asset_for_policy, list(store.findings.values()))
+
+    decision = _apply_recon_gate(store, hypothesis, decision, explicit_intent)
 
     route = _route_for_decision(decision, router)
 
@@ -605,9 +643,12 @@ class BrainLoop:
             wave_events: list[dict[str, Any]] = []
 
             if self.adaptive_pcs:
+                recon_host = host_key((asset.locator if asset else "") or self.store.base_target)
+                recon_ok = self.store.recon_complete_for(recon_host) if recon_host else True
                 branch_count, pcs_reason = self.store.pcs.branches_for_step(
                     self.store.clusters,
                     wave_new_findings,
+                    recon_complete=recon_ok,
                 )
                 branch_count = min(branch_count, self.max_branches)
             else:

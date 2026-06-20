@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+from software_butcher.core.url_utils import canonical_web_url, is_plausible_target_path
+
 from .path_graph import parent_path
 from .schema import Finding, Hypothesis
 
@@ -19,30 +21,52 @@ class HypothesisQueue:
         self._items: dict[str, Hypothesis] = {}
         self._lock = lock
 
-    def add(self, hypothesis: Hypothesis) -> None:
-        key = self._key(hypothesis.path, hypothesis.reason)
+    def add(self, hypothesis: Hypothesis, base_target: str = "") -> None:
+        normalized = self._normalize_hypothesis(hypothesis, base_target)
+        if normalized is None:
+            return
+        key = self._key(normalized.path, normalized.reason)
         if self._lock:
             with self._lock:
                 if key not in self._items:
-                    self._items[key] = hypothesis
+                    self._items[key] = normalized
         elif key not in self._items:
-            self._items[key] = hypothesis
+            self._items[key] = normalized
 
-    def add_from_finding(self, finding: Finding) -> None:
+    def add_from_finding(self, finding: Finding, base_target: str = "") -> None:
         if finding.asset_type in {"binary", "source_repo", "static_asset"}:
             return
 
         parent = finding.parent_path or parent_path(finding.path)
-        if parent:
-            self.add(
-                Hypothesis(
-                    path=parent,
-                    reason=f"Parent path generated from child discovery: {finding.path}",
-                    source_finding_id=finding.id,
-                    priority=0.9 if finding.status == "confirmed" else 0.75,
-                    metadata={"generated_by": "parent_path_rule", "asset_type": finding.asset_type},
-                )
-            )
+        if not parent or not is_plausible_target_path(parent, base_target):
+            return
+
+        resolved = canonical_web_url(parent, base_target) or parent
+        self.add(
+            Hypothesis(
+                path=resolved,
+                reason=f"Parent path generated from child discovery: {finding.path}",
+                source_finding_id=finding.id,
+                priority=0.9 if finding.status == "confirmed" else 0.75,
+                metadata={"generated_by": "parent_path_rule", "asset_type": finding.asset_type},
+            ),
+            base_target=base_target,
+        )
+
+    @staticmethod
+    def _normalize_hypothesis(hypothesis: Hypothesis, base_target: str) -> Hypothesis | None:
+        path = hypothesis.path
+        if base_target:
+            canonical = canonical_web_url(path, base_target)
+            if canonical:
+                path = canonical
+            if not is_plausible_target_path(path, base_target):
+                return None
+        elif not is_plausible_target_path(path, base_target):
+            return None
+        if path != hypothesis.path:
+            hypothesis.path = path
+        return hypothesis
 
     def next(self) -> Hypothesis | None:
         if self._lock:

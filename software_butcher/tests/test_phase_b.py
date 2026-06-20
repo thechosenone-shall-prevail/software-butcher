@@ -16,18 +16,17 @@ from software_butcher.state.store import FindingStore
 def test_domain_seed_osint_hypotheses():
     asset = Asset(locator="corp.example.com", asset_type="domain")
     hyps = build_domain_seed_hypotheses(asset)
-    assert len(hyps) == 3
-    intents = {h.metadata["intent"] for h in hyps}
-    assert intents == {"bugbounty_recon", "technology_fingerprint", "endpoint_discovery"}
-    assert all(h.path == "https://corp.example.com" for h in hyps)
+    intents = {h.metadata["intent"] for h in hyps if h.metadata.get("generated_by") == "domain_seed"}
+    assert intents == {"web_behavior_analysis", "technology_fingerprint", "endpoint_discovery"}
+    assert all(h.path == "https://corp.example.com" for h in hyps if h.metadata.get("generated_by") == "domain_seed")
 
 
 def test_domain_seed_single_hypothesis_for_non_domain():
     asset = Asset(locator="https://corp.example.com/admin", asset_type="web_endpoint")
     assert not is_domain_like(asset)
     hyps = build_domain_seed_hypotheses(asset)
-    assert len(hyps) == 1
-    assert hyps[0].metadata["intent"] == "endpoint_discovery"
+    seed_intents = {h.metadata["intent"] for h in hyps if h.metadata.get("generated_by") == "domain_seed"}
+    assert seed_intents == {"web_behavior_analysis", "technology_fingerprint", "endpoint_discovery"}
 
 
 def test_resolve_php_upstream_source():
@@ -137,4 +136,4 @@ def test_fresh_domain_project_seeds_osint(tmp_path):
     project.seed_asset(asset)
 
     intents = {h.metadata["intent"] for h in project.findings.queue.pending_list()}
-    assert "bugbounty_recon" in intents
+    assert "web_behavior_analysis" in intents

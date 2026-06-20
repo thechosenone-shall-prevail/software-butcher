@@ -36,8 +36,26 @@ def test_pcs_validation_mode_on_convergence():
             supporting_paths=5,
             convergence_score=0.85,
             evidence_count=10,
-        )
+        ),
+        "auth": ConvergenceCluster(
+            theme="auth",
+            supporting_paths=3,
+            convergence_score=0.80,
+            evidence_count=6,
+        ),
     }
-    count, reason = pcs.branches_for_step(clusters, [])
+    count, reason = pcs.branches_for_step(clusters, [], recon_complete=True)
     assert count == 1
     assert pcs.state.validation_mode is True
+
+
+def test_pcs_blocks_convergence_until_recon_complete():
+    pcs = ProgressiveConvergenceSearch()
+    clusters = {
+        "ssrf": ConvergenceCluster(theme="ssrf", convergence_score=0.9, evidence_count=10),
+        "auth": ConvergenceCluster(theme="auth", convergence_score=0.85, evidence_count=8),
+    }
+    count, reason = pcs.branches_for_step(clusters, [], recon_complete=False)
+    assert count == 1
+    assert pcs.state.validation_mode is False
+    assert "recon incomplete" in reason
