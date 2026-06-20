@@ -1,5 +1,8 @@
 # Software Butcher
 
+We cut through legacy bloat to expose the vulnerable core for inspection —
+one sharp mind, one ruthless process, no committee debates.
+
 Autonomous security assessment harness built around one idea: let an
 opinionated reasoning engine and a collection of lightweight "shelves" run
 continuous, evidence-driven assessment workflows and produce an actionable
@@ -94,7 +97,8 @@ Additional adapters plug in without changing the Brain contract:
 
 ### Brain — reasoning loop
 
-The Brain owns the hypothesis queue and finding state:
+The Brain owns the hypothesis queue and finding state:  
+*The hunter that chooses which component to target next.*
 
 1. Pop the next hypothesis (priority-sorted, optionally reordered by DeepSeek)
 2. Read current findings and decide intent/capability (DeepSeek JSON or deterministic policy fallback)
@@ -105,7 +109,8 @@ The Brain owns the hypothesis queue and finding state:
 
 ### Brain — Progressive Convergence Search (PCS)
 
-The Brain does **not** always run N parallel branches. PCS adapts:
+The Brain does **not** always run N parallel branches. PCS adapts:  
+*We don't guess; we zero in on the weakest spot and act with surgical precision.*
 
 | Trigger | Branches | Behavior |
 |---------|----------|----------|
@@ -149,7 +154,8 @@ Findings promote `hypothesis` → `confirmed` when:
 
 ### Synthesis — verdict layer
 
-After the Brain finishes (or on demand), Synthesis reads the complete finding state and produces:
+After the Brain finishes (or on demand), Synthesis reads the complete finding state and produces:  
+*Presenting concise, evidence-backed facts of how the perimeter was compromised.*
 
 - **Verdict**: `secure` · `partially_hardened` · `compromised`
 - Cited findings, reproduction steps, and remediation hints
