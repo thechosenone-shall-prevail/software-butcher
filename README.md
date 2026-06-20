@@ -1,10 +1,68 @@
 # Software Butcher
 
-Autonomous security assessment harness built around one idea: **replace a swarm of agents with one reasoning actor, persistent memory, and a large tool shelf.**
+Autonomous security assessment harness built around one idea: let an
+opinionated reasoning engine and a collection of lightweight "shelves" run
+continuous, evidence-driven assessment workflows and produce an actionable
+technical verdict.
 
-Software Butcher reads a scoped target, runs a continuous reasoning loop against a shared finding state, executes tools through HexStrike (and pluggable framework adapters), then synthesizes an evidence-backed verdict. Frontier models power the Brain and Synthesis layers — they are swappable; results may vary by model.
+Software Butcher composes several focused components to automate modern red
+team and bug-bounty workflows:
 
-![Software Butcher architecture](docs/architecture.png)
+- The Brain: an LLM-driven advisor (DeepSeek) and deterministic policy that
+  selects the next capability to run against a hypothesis.
+- Shelves & Adapters: thin adapters that translate Brain intent into concrete
+  tool executions (HexStrike is the primary shelf/adapter used by default).
+- Runner & Artifacts: `SafeRunner` and `ShelfRunner` drive external tools,
+  capture stdout/stderr, and persist artifacts for later synthesis and review.
+- State & Synthesis: a persistent `FindingStore` and synthesizer create an
+  evidence-backed verdict (`secure`, `partially_hardened`, or `compromised`).
+
+Architecture
+
+![Software Butcher architecture](docs/Architecture.jpg)
+
+Quick start
+
+1. Install dependencies from `requirements.txt` or `pyproject.toml`.
+2. Prepare a scope (targets) and run the framework using the CLI entrypoint:
+
+```bash
+python -m software_butcher --scope my-scope.json --output ./workspace
+```
+
+Key concepts
+
+- `ButcherProject` — workspace abstraction holding scope, inventory and findings.
+- `run_brain_once()` — core loop: pick a hypothesis, select capability (LLM or
+  policy), route to an adapter, execute, and ingest findings.
+- `AdapterRequest` / `AdapterResult` — normalized contract between Brain and
+  shelves; implement `plan`, `execute`, `normalize_results` in new adapters.
+- `SessionStore` — persists cookies/tokens and now tracks post-exploit shell
+  sessions to enable command chaining across tool runs.
+- `Synthesizer` — converts finding state into a reproducible report and fixes.
+
+Extending Software Butcher
+
+- Add a new shelf/adapter under `software_butcher/shelves/` implementing the
+  `FrameworkAdapter` interface in `software_butcher/core/adapter.py`.
+- Register adapters with the global registry or via configuration so the Brain
+  can route capabilities to them.
+
+Development notes
+
+- LLM integration is optional — the system will fall back to deterministic
+  policies when a model is not configured.
+- Artifacts and results are stored under `software_butcher/artifacts/` for
+  reproducibility and manual inspection.
+
+Contributing
+
+Contributions, issues and ideas welcome. Please follow normal Pull Request
+practices and include tests under `software_butcher/tests/`.
+
+License
+
+See `LICENSE` in the repository root.
 
 ---
 
