@@ -474,3 +474,40 @@ class HexstrikeApiClient:
     def http_intruder(self, **kwargs: Any) -> dict[str, Any]:
         return self.safe_post("api/tools/http-framework", {"action": "intruder", **kwargs}, timeout=120)
 
+    # ══════════════════════════════════════════════════════════════════════
+    # SHELL SESSION MANAGEMENT
+    # ══════════════════════════════════════════════════════════════════════
+
+    def list_metasploit_sessions(self) -> dict[str, Any]:
+        """List active Metasploit sessions."""
+        return self.safe_post("api/metasploit/list-sessions", {}, timeout=30)
+
+    def run_in_metasploit_session(self, session_id: str, command: str) -> dict[str, Any]:
+        """Run a command in a specific Metasploit session."""
+        return self.safe_post("api/metasploit/session-command", {"session_id": session_id, "command": command}, timeout=60)
+
+    def list_sliver_sessions(self) -> dict[str, Any]:
+        """List active Sliver beacon sessions."""
+        return self.safe_post("api/sliver/list-sessions", {}, timeout=30)
+
+    def run_in_sliver_session(self, session_id: str, command: str) -> dict[str, Any]:
+        """Run a command in a specific Sliver beacon session."""
+        return self.safe_post("api/sliver/session-command", {"session_id": session_id, "command": command}, timeout=60)
+
+    def shell_execute(self, session_type: str, session_id: str, command: str, **kwargs: Any) -> dict[str, Any]:
+        """Generic shell command execution for any session type.
+        
+        Routes to the appropriate session handler based on session_type.
+        """
+        dispatch = {
+            "metasploit": lambda: self.run_in_metasploit_session(session_id, command),
+            "meterpreter": lambda: self.run_in_metasploit_session(session_id, command),
+            "sliver": lambda: self.run_in_sliver_session(session_id, command),
+            "beacon": lambda: self.run_in_sliver_session(session_id, command),
+        }
+        handler = dispatch.get(session_type.lower())
+        if handler:
+            return handler()
+        # Fallback to generic command execution
+        return self.safe_post("api/shell/execute", {"session_type": session_type, "session_id": session_id, "command": command, **kwargs}, timeout=60)
+

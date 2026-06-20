@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 from urllib.parse import urljoin, urlsplit
+import re
 
 from ...core.adapter import AdapterCapability, AdapterRequest, AdapterResult
 from ...core.asset_classifier import classify_url_asset_type
-from ...state.session_state import get_origin
+from ...state.session_state import get_origin, ShellSession
 from ...core.registry import DEFAULT_REGISTRY
 from ...core.runner import SafeRunner
 from .client import DEFAULT_HEXSTRIKE_SERVER, HexstrikeApiClient, HexstrikeServerUnavailableError
@@ -158,6 +159,12 @@ class HexstrikeAdapter:
             name="bugbounty_comprehensive",
             description="Full automated bug bounty comprehensive assessment",
             asset_types=("domain", "web_endpoint", "api"),
+        ),
+        # ── Shell Session Management ────────────────────────────────────────
+        AdapterCapability(
+            name="shell_command_execution",
+            description="Run commands in established shell sessions (Metasploit, Sliver, SSH)",
+            asset_types=("ip", "domain"),
         ),
     )
 
@@ -314,12 +321,18 @@ class HexstrikeAdapter:
             "bugbounty_recon": lambda: self.client.bugbounty_recon(target, **safe_opts),
             "bugbounty_comprehensive": lambda: self.client.bugbounty_comprehensive(target, **safe_opts),
             "cve_lookup": lambda: self._run_cve_lookup(target, safe_opts),
+            # Shell session management
+            "shell_command_execution": lambda: self._execute_shell_command(target, options, safe_opts),
         }
 
         handler = dispatch.get(capability)
         if handler:
             try:
-                return handler()
+                result = handler()
+                # Detect and store shell sessions from exploit results
+                if capability in {"exploit_generation", "sql_injection_probing", "shell_command_execution"}:
+                    self._store_shell_if_detected(result, target, options)
+                return result
             except Exception as exc:
                 return {"error": str(exc), "success": False}
         return None
@@ -330,6 +343,61 @@ class HexstrikeAdapter:
         if cve_id:
             return self.client.generate_exploit_from_cve(cve_id=cve_id, **options)
         return self.client.detect_technologies(technology, **options)
+
+    def _execute_shell_command(self, target: str, options: dict[str, Any], safe_opts: dict[str, Any]) -> dict[str, Any]:
+        """Execute a command in an existing shell session.
+        
+        If a session_id is provided in options, use that specific session.
+        Otherwise, find the best session for the target.
+        """
+        session_store = options.get("session_store") if options else None
+        if not session_store:
+            return {"error": "No session store available", "success": False}
+        
+        # Extract command from options
+        command = safe_opts.get("command") or options.get("command", "id")
+        session_id = safe_opts.get("session_id") or options.get("session_id")
+        
+        # If session_id is provided, use it directly
+        if session_id:
+            session = session_store.shell_sessions.get_session(session_id)
+            if not session:
+                return {"error": f"Session {session_id} not found", "success": False}
+            if not session.active:
+                return {"error": f"Session {session_id} is inactive", "success": False}
+            
+            # Execute command in the session
+            result = self.client.shell_execute(session.session_type, session.session_id, command)
+            
+            # Update session state
+            stdout = result.get("stdout", "") or ""
+            stderr = result.get("stderr", "") or ""
+            session_store.shell_sessions.update_session(session_id, command, stdout + " " + stderr)
+            
+            return result
+        
+        # Otherwise, find the best session for the target
+        # Extract host from target (could be URL or IP)
+        from urllib.parse import urlsplit
+        if target.startswith(("http://", "https://")):
+            parsed = urlsplit(target)
+            host = parsed.netloc.split(":")[0]
+        else:
+            host = target.split(":")[0]
+        
+        best_session = session_store.shell_sessions.get_best_session_for_target(host)
+        if not best_session:
+            return {"error": f"No active shell session found for {host}", "success": False}
+        
+        # Execute command in the best session
+        result = self.client.shell_execute(best_session.session_type, best_session.session_id, command)
+        
+        # Update session state
+        stdout = result.get("stdout", "") or ""
+        stderr = result.get("stderr", "") or ""
+        session_store.shell_sessions.update_session(best_session.session_id, command, stdout + " " + stderr)
+        
+        return result
 
     @staticmethod
     def _intent_to_capability(intent: str) -> str:
@@ -360,6 +428,10 @@ class HexstrikeAdapter:
             "bugbounty_recon": "bugbounty_recon",
             "bugbounty_comprehensive": "bugbounty_comprehensive",
             "cve_lookup": "cve_lookup",
+            "shell_command_execution": "shell_command_execution",
+            "shell_execute": "shell_command_execution",
+            "post_exploit": "shell_command_execution",
+            "privesc": "shell_command_execution",
         }
         return mapping.get(intent, "endpoint_discovery")
 
@@ -643,6 +715,77 @@ class HexstrikeAdapter:
             "sqlmap": f"sqlmap -u {quoted_target} --batch",
         }
         return commands.get(tool, f"{tool} {quoted_target}")
+
+    def _detect_shell_session(self, stdout: str, stderr: str, target: str) -> ShellSession | None:
+        """Detect if a shell session was established from tool output.
+        
+        Returns a ShellSession object if shell establishment is detected, None otherwise.
+        """
+        output = stdout.lower() + " " + stderr.lower()
+        
+        # Metasploit session patterns
+        msf_session_match = re.search(r'session (\d+) opened', output, re.IGNORECASE)
+        if msf_session_match:
+            session_id = msf_session_match.group(1)
+            # Try to extract user info
+            user_match = re.search(r'as user\s+(\w+)', output, re.IGNORECASE)
+            user = user_match.group(1) if user_match else None
+            return ShellSession(
+                session_id=session_id,
+                session_type="metasploit",
+                host=target,
+                user=user,
+                metadata={"detection_method": "metasploit_session_pattern"},
+            )
+        
+        # Meterpreter patterns
+        meterpreter_match = re.search(r'meterpreter\s+(\d+)', output, re.IGNORECASE)
+        if meterpreter_match:
+            session_id = meterpreter_match.group(1)
+            return ShellSession(
+                session_id=session_id,
+                session_type="meterpreter",
+                host=target,
+                metadata={"detection_method": "meterpreter_pattern"},
+            )
+        
+        # Sliver beacon patterns
+        sliver_match = re.search(r'beacon\s+(\w+)', output, re.IGNORECASE)
+        if sliver_match:
+            session_id = sliver_match.group(1)
+            return ShellSession(
+                session_id=session_id,
+                session_type="sliver",
+                host=target,
+                metadata={"detection_method": "sliver_beacon_pattern"},
+            )
+        
+        # Generic shell patterns (uid=, whoami, etc.)
+        if "uid=" in output or "whoami" in output or "shell" in output:
+            # Generate a synthetic session ID for web shells or reverse shells
+            import hashlib
+            synthetic_id = hashlib.md5(f"{target}_{len(output)}".encode()).hexdigest()[:8]
+            return ShellSession(
+                session_id=f"shell_{synthetic_id}",
+                session_type="web_shell",
+                host=target,
+                metadata={"detection_method": "generic_shell_pattern", "output_snippet": output[:200]},
+            )
+        
+        return None
+
+    def _store_shell_if_detected(self, result: dict[str, Any], target: str, options: dict[str, Any]) -> None:
+        """Detect and store shell sessions from tool execution results."""
+        session_store = options.get("session_store") if options else None
+        if not session_store:
+            return
+        
+        stdout = result.get("stdout", "") or ""
+        stderr = result.get("stderr", "") or ""
+        
+        shell_session = self._detect_shell_session(stdout, stderr, target)
+        if shell_session:
+            session_store.shell_sessions.add_session(shell_session)
 
 
 DEFAULT_REGISTRY.register_adapter(HexstrikeAdapter.NAME, HexstrikeAdapter)

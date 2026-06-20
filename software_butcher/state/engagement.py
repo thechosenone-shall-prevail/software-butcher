@@ -103,49 +103,112 @@ def infer_phase(findings: list[Finding], state: EngagementState) -> EngagementSt
     return state
 
 
-def phase_hypotheses(state: EngagementState, base_target: str) -> list[Hypothesis]:
-    """Generate phase-appropriate follow-up hypotheses (HTB-aware)."""
+def phase_hypotheses(state: EngagementState, base_target: str, session_store=None) -> list[Hypothesis]:
+    """Generate phase-appropriate follow-up hypotheses (HTB-aware).
+    
+    If shell sessions are available, prioritize shell_command_execution over re-exploitation.
+    """
     generated: list[Hypothesis] = []
     root = base_target.rstrip("/")
 
+    # Check if we have active shell sessions
+    has_shell_sessions = False
+    if session_store and hasattr(session_store, 'shell_sessions'):
+        active_sessions = [s for s in session_store.shell_sessions.sessions.values() if s.active]
+        has_shell_sessions = len(active_sessions) > 0
+
     if state.phase == "foothold":
-        generated.append(
-            Hypothesis(
-                path=root,
-                reason="Foothold established — enumerate privesc vectors (sudo, SUID, cron, kernel).",
-                source_finding_id="phase:foothold",
-                priority=0.95,
-                metadata={"intent": "ad_enumeration", "asset_type": "ip", "phase": "privesc"},
-            )
-        )
-        for flag_path in ("/home/*/user.txt", "/user.txt", f"{root}/user.txt"):
+        if has_shell_sessions:
+            # Use shell sessions for enumeration instead of re-exploiting
             generated.append(
                 Hypothesis(
-                    path=flag_path.replace("*", "user"),
-                    reason="Attempt to read user flag after foothold.",
+                    path=root,
+                    reason="Foothold established — enumerate privesc vectors in shell (sudo -l, SUID, cron).",
                     source_finding_id="phase:foothold",
-                    priority=0.9,
-                    metadata={"intent": "continue_discovery", "phase": "exfil", "flag_target": "user"},
+                    priority=0.98,
+                    metadata={"intent": "shell_command_execution", "asset_type": "ip", "phase": "privesc", "command": "sudo -l && id"},
                 )
             )
+            generated.append(
+                Hypothesis(
+                    path=root,
+                    reason="Enumerate SUID binaries in established shell.",
+                    source_finding_id="phase:foothold",
+                    priority=0.95,
+                    metadata={"intent": "shell_command_execution", "asset_type": "ip", "phase": "privesc", "command": "find / -perm -4000 -type f 2>/dev/null"},
+                )
+            )
+        else:
+            generated.append(
+                Hypothesis(
+                    path=root,
+                    reason="Foothold established — enumerate privesc vectors (sudo, SUID, cron, kernel).",
+                    source_finding_id="phase:foothold",
+                    priority=0.95,
+                    metadata={"intent": "ad_enumeration", "asset_type": "ip", "phase": "privesc"},
+                )
+            )
+        
+        for flag_path in ("/home/*/user.txt", "/user.txt", f"{root}/user.txt"):
+            if has_shell_sessions:
+                generated.append(
+                    Hypothesis(
+                        path=flag_path.replace("*", "user"),
+                        reason="Attempt to read user flag via shell session.",
+                        source_finding_id="phase:foothold",
+                        priority=0.95,
+                        metadata={"intent": "shell_command_execution", "phase": "exfil", "flag_target": "user", "command": f"cat {flag_path.replace('*', '*')}"},
+                    )
+                )
+            else:
+                generated.append(
+                    Hypothesis(
+                        path=flag_path.replace("*", "user"),
+                        reason="Attempt to read user flag after foothold.",
+                        source_finding_id="phase:foothold",
+                        priority=0.9,
+                        metadata={"intent": "continue_discovery", "phase": "exfil", "flag_target": "user"},
+                    )
+                )
 
     if state.phase == "privesc":
-        generated.append(
-            Hypothesis(
-                path=root,
-                reason="Privilege escalation phase — hunt root flag and persistence.",
-                source_finding_id="phase:privesc",
-                priority=0.98,
-                metadata={"intent": "exploit_generation", "asset_type": "ip", "phase": "privesc"},
+        if has_shell_sessions:
+            generated.append(
+                Hypothesis(
+                    path=root,
+                    reason="Privilege escalation phase — hunt root flag in shell.",
+                    source_finding_id="phase:privesc",
+                    priority=0.99,
+                    metadata={"intent": "shell_command_execution", "asset_type": "ip", "phase": "privesc", "command": "cat /root/root.txt"},
+                )
             )
-        )
+            generated.append(
+                Hypothesis(
+                    path="/root",
+                    reason="List root directory contents in established shell.",
+                    source_finding_id="phase:privesc",
+                    priority=0.97,
+                    metadata={"intent": "shell_command_execution", "asset_type": "ip", "phase": "privesc", "command": "ls -la /root/"},
+                )
+            )
+        else:
+            generated.append(
+                Hypothesis(
+                    path=root,
+                    reason="Privilege escalation phase — hunt root flag and persistence.",
+                    source_finding_id="phase:privesc",
+                    priority=0.98,
+                    metadata={"intent": "exploit_generation", "asset_type": "ip", "phase": "privesc"},
+                )
+            )
+        
         generated.append(
             Hypothesis(
                 path="/root/root.txt",
                 reason="Attempt to read root flag after privesc.",
                 source_finding_id="phase:privesc",
                 priority=0.99,
-                metadata={"intent": "continue_discovery", "phase": "exfil", "flag_target": "root"},
+                metadata={"intent": "shell_command_execution" if has_shell_sessions else "continue_discovery", "phase": "exfil", "flag_target": "root", "command": "cat /root/root.txt" if has_shell_sessions else None},
             )
         )
 

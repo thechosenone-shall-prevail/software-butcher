@@ -5,12 +5,14 @@ from __future__ import annotations
 from software_butcher.state.convergence import recompute_clusters
 from software_butcher.state.schema import ConvergenceCluster, Finding
 from software_butcher.state.engagement import EngagementState
+from software_butcher.state.session_state import SessionStore
 
 
 def build_brain_context(
     findings: list[Finding],
     engagement: EngagementState,
     clusters: dict[str, ConvergenceCluster] | None = None,
+    session_store: SessionStore | None = None,
     limit: int = 40,
 ) -> str:
     """Build a structured state summary for DeepSeek capability selection."""
@@ -21,8 +23,20 @@ def build_brain_context(
         f"Engagement phase: {engagement.phase}",
         f"Flags: user={engagement.user_flag or 'none'} root={engagement.root_flag or 'none'}",
         "",
-        "Convergence clusters (emergent confidence):",
     ]
+
+    # Add shell session information if available
+    if session_store and session_store.shell_sessions.sessions:
+        active_sessions = [s for s in session_store.shell_sessions.sessions.values() if s.active]
+        lines.append(f"Active shell sessions: {len(active_sessions)}")
+        for session in active_sessions[:5]:  # Show up to 5 sessions
+            lines.append(
+                f"  - {session.session_type}:{session.session_id} @ {session.host}"
+                f" (user={session.user or 'unknown'} cwd={session.cwd})"
+            )
+        lines.append("")
+
+    lines.extend(["Convergence clusters (emergent confidence):"])
 
     for theme, cluster in sorted(clusters.items(), key=lambda x: -x[1].convergence_score)[:8]:
         lines.append(

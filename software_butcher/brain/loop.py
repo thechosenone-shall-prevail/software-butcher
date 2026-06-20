@@ -57,6 +57,7 @@ BINARY & REVERSE ENGINEERING:
 
 EXPLOIT & POST-EXPLOITATION:
 - exploit_generation: Metasploit module selection, msfvenom payload generation
+- shell_command_execution: Run commands in established shell sessions (Metasploit, Sliver, SSH)
 - oss_fuzzing: deep fuzzing via BOAZ/OSS-Fuzz
 - payload_evasion: BOAZ evasive payload generation (77+ loaders, 12 encoders)
 - c2_deployment: deploy Sliver C2 beacons for post-exploitation
@@ -132,6 +133,7 @@ _INTENT_ADAPTER_MAP: dict[str, str] = {
     "iac_scanning": "hexstrike",
     "ad_enumeration": "hexstrike",
     "exploit_generation": "hexstrike",
+    "shell_command_execution": "hexstrike",
     "ai_attack_chain": "hexstrike",
     "technology_fingerprint": "hexstrike",
     "bugbounty_recon": "hexstrike",
@@ -288,6 +290,7 @@ def run_brain_once(
             list(store.findings.values()),
             store.engagement,
             store.clusters,
+            store.session_store,
         )
         phase = store.engagement.phase
         pcs_mode = "validation" if store.pcs.state.validation_mode else "exploration"

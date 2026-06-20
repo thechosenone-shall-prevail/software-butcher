@@ -93,7 +93,7 @@ class FindingStore:
         self.engagement = infer_phase(list(self.findings.values()), self.engagement)
 
         if self._base_target:
-            for hyp in phase_hypotheses(self.engagement, self._base_target):
+            for hyp in phase_hypotheses(self.engagement, self._base_target, self.session_store):
                 self.queue.add(hyp)
 
     def add_hypothesis(self, hypothesis: Hypothesis) -> None:
