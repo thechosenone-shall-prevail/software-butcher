@@ -40,6 +40,10 @@ class FindingStore:
     def set_base_target(self, target: str) -> None:
         self._base_target = target
 
+    @property
+    def base_target(self) -> str:
+        return self._base_target
+
     def can_run_tool(self, limit: int) -> bool:
         with self._lock:
             return self.tool_calls < limit

@@ -141,6 +141,8 @@ _INTENT_ADAPTER_MAP: dict[str, str] = {
     "bugbounty_comprehensive": "hexstrike",
     "payload_evasion": "boaz",
     "oss_fuzzing": "boaz",
+    "source_static_analysis": "code_analysis",
+    "continuous_fuzzing": "oss_fuzz",
 }
 
 
@@ -204,6 +206,20 @@ def _findings_from_adapter_result(
     return findings
 
 
+def _ingest_finding(
+    store: FindingStore,
+    finding: Finding,
+    branch_id: str | None,
+    on_finding_ingested: Any | None,
+) -> bool:
+    """Ingest a finding and notify optional asset-expansion callback."""
+    if not store.ingest_finding(finding, branch_id=branch_id):
+        return False
+    if on_finding_ingested is not None:
+        on_finding_ingested(finding)
+    return True
+
+
 def _run_legacy_tool(
     store: FindingStore,
     hypothesis,
@@ -212,6 +228,7 @@ def _run_legacy_tool(
     parent_path_value: str | None,
     default_asset_type: str,
     branch_id: str | None = None,
+    on_finding_ingested: Any | None = None,
 ) -> Finding | None:
     tool_spec = None
     preferred = hypothesis.metadata.get("tool") if hypothesis.metadata else None
@@ -241,7 +258,7 @@ def _run_legacy_tool(
         parent_path=parent_path_value,
         asset_type=default_asset_type,
     )
-    store.ingest_finding(finding, branch_id=branch_id)
+    _ingest_finding(store, finding, branch_id, on_finding_ingested)
     return finding
 
 
@@ -257,6 +274,7 @@ def run_brain_once(
     advisor: OpenRouterAdvisor | None = None,
     llm_client: Any | None = None,
     branch_id: str | None = None,
+    on_finding_ingested: Any | None = None,
 ) -> Optional[Finding]:
     """Run a single Brain iteration: pop hypothesis, route, execute, write findings."""
     # ── LLM advisor: optionally reorder the queue before popping ──────────
@@ -376,6 +394,8 @@ def run_brain_once(
             asset_type=decision.asset.asset_type,
         )
         store.ingest_finding(budget_finding, branch_id=branch_id)
+        if on_finding_ingested is not None:
+            on_finding_ingested(budget_finding)
         store.queue.complete(hypothesis.id)
         store.save_or_log()
         return budget_finding
@@ -422,7 +442,7 @@ def run_brain_once(
                 parent_path=parent_path_value,
                 asset_type=decision.asset.asset_type,
             )
-            store.ingest_finding(error_finding, branch_id=branch_id)
+            _ingest_finding(store, error_finding, branch_id, on_finding_ingested)
             store.queue.complete(hypothesis.id)
             store.save_or_log()
             return error_finding
@@ -433,7 +453,7 @@ def run_brain_once(
             decision.asset.asset_type,
             branch_id=branch_id,
         ):
-            if store.ingest_finding(finding, branch_id=branch_id):
+            if _ingest_finding(store, finding, branch_id, on_finding_ingested):
                 for generated in hypothesis_generator.generate(finding):
                     store.add_hypothesis(generated)
                 if primary_finding is None:
@@ -451,6 +471,7 @@ def run_brain_once(
             parent_path_value,
             decision.asset.asset_type,
             branch_id=branch_id,
+            on_finding_ingested=on_finding_ingested,
         )
         if primary_finding:
             for generated in hypothesis_generator.generate(primary_finding):
@@ -517,6 +538,7 @@ class BrainLoop:
         router: AssetRouter | None = None,
         llm_client: Any | None = None,
         advisor: OpenRouterAdvisor | None = None,
+        on_finding_ingested: Any | None = None,
     ) -> None:
         self.store = store
         self.scope = scope
@@ -531,6 +553,7 @@ class BrainLoop:
         self.router = router or AssetRouter()
         self.llm_client = llm_client
         self.advisor = advisor
+        self.on_finding_ingested = on_finding_ingested
 
     def run_once(self, asset: Asset | None = None, branch_id: str | None = None) -> dict[str, Any]:
         before = len(self.store.findings)
@@ -547,6 +570,7 @@ class BrainLoop:
             advisor=self.advisor,
             llm_client=self.llm_client,
             branch_id=branch_id,
+            on_finding_ingested=self.on_finding_ingested,
         )
         if finding is None:
             pending = [item for item in self.store.queue.to_list() if item["status"] == "pending"]

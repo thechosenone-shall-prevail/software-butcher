@@ -277,12 +277,30 @@ class HexstrikeAdapter:
         """Route a capability name to the correct HexstrikeApiClient method.
 
         Returns None for capabilities that should use the legacy discovery flow
-        (endpoint_discovery, web_behavior_analysis, authenticated_discovery).
+        (web_behavior_analysis, authenticated_discovery).
+
+        endpoint_discovery runs gobuster directly so unlinked paths like /hall
+        are found even when analyze_target returns nothing useful.
         """
-        # These capabilities use the existing discovery flow
-        if capability in {"endpoint_discovery", "web_behavior_analysis",
-                          "api_enumeration", "authenticated_discovery"}:
+        # web_behavior_analysis and authenticated_discovery use the existing
+        # discovery flow (HTML crawl + analyze_target).
+        if capability in {"web_behavior_analysis", "authenticated_discovery"}:
             return None
+        # api_enumeration delegates to api_fuzzer for schema/endpoint discovery.
+        if capability == "api_enumeration":
+            safe_opts = {k: v for k, v in options.items()
+                         if k not in {"session_store", "capability"}}
+            try:
+                return self.client.run_api_fuzzer(target, **safe_opts)
+            except Exception as exc:
+                return {"error": str(exc), "success": False}
+        # endpoint_discovery runs gobuster to find unlinked paths (e.g. /hall)
+        # in addition to the HTML crawl that already runs in _execute_plan.
+        if capability == "endpoint_discovery":
+            try:
+                return self.client.run_gobuster(target)
+            except Exception as exc:
+                return {"error": str(exc), "success": False}
 
         # Filter out internal keys that shouldn't be sent to the server
         safe_opts = {k: v for k, v in options.items()

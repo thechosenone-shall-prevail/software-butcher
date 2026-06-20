@@ -91,6 +91,8 @@ def default_registry() -> AdapterRegistry:
     registry = AdapterRegistry()
 
     from software_butcher.shelves.binary.triage import BinaryTriageAdapter
+    from software_butcher.shelves.binary.oss_fuzz import OssFuzzAdapter
+    from software_butcher.shelves.code.analysis import CodeAnalysisAdapter
     from software_butcher.shelves.frameworks.atomic_red_team.adapter import AtomicRedTeamAdapter
     from software_butcher.shelves.frameworks.boaz_adapter import BoazAdapter, SliverAdapter
     from software_butcher.shelves.frameworks.caldera.adapter import CalderaAdapter
@@ -99,6 +101,8 @@ def default_registry() -> AdapterRegistry:
     from software_butcher.shelves.web.playwright_curl import PlaywrightCurlAdapter
 
     registry.register(BinaryTriageAdapter())
+    registry.register(OssFuzzAdapter())
+    registry.register(CodeAnalysisAdapter())
     registry.register(HexstrikeAdapter())
     registry.register(PlaywrightCurlAdapter())
     registry.register(AtomicRedTeamAdapter())

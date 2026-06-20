@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def get_origin(url: str) -> str:
@@ -79,8 +79,8 @@ class ShellSession:
     last_command: str = ""  # Last command executed
     last_output: str = ""  # Last command output
     active: bool = True  # Whether session is still active
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    last_used: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_used: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     metadata: dict[str, Any] = field(default_factory=dict)  # Additional session data
     
     def to_dict(self) -> dict[str, Any]:
@@ -111,8 +111,8 @@ class ShellSession:
             last_command=data.get("last_command", ""),
             last_output=data.get("last_output", ""),
             active=data.get("active", True),
-            created_at=data.get("created_at", datetime.utcnow().isoformat()),
-            last_used=data.get("last_used", datetime.utcnow().isoformat()),
+            created_at=data.get("created_at", datetime.now(timezone.utc).isoformat()),
+            last_used=data.get("last_used", datetime.now(timezone.utc).isoformat()),
             metadata=data.get("metadata", {}),
         )
     
@@ -120,7 +120,7 @@ class ShellSession:
         """Update session after running a command."""
         self.last_command = command
         self.last_output = output
-        self.last_used = datetime.utcnow().isoformat()
+        self.last_used = datetime.now(timezone.utc).isoformat()
 
 
 class ShellSessionStore:

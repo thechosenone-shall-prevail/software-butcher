@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -74,3 +76,33 @@ class AssetInventory:
 
     def to_list(self) -> list[dict[str, Any]]:
         return [asset.to_dict() for asset in self._assets.values()]
+
+    def has_locator(self, locator: str) -> bool:
+        return locator in self._by_locator
+
+    def save(self, path: str | Path) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"assets": self.to_list()}
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "AssetInventory":
+        path = Path(path)
+        inventory = cls()
+        if not path.exists():
+            return inventory
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        for item in payload.get("assets", []):
+            inventory.add(
+                Asset(
+                    id=item["id"],
+                    locator=item["locator"],
+                    asset_type=item.get("asset_type", "unknown"),
+                    parent=item.get("parent"),
+                    metadata=item.get("metadata", {}),
+                    discovered_by=item.get("discovered_by", "manual"),
+                    created_at=item.get("created_at", ""),
+                )
+            )
+        return inventory

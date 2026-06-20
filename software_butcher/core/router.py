@@ -86,6 +86,13 @@ class AssetRouter:
                     adapter="hexstrike",
                     reason="Use HexStrike server's Checkov/Terrascan for IaC scanning.",
                 )
+            if intent in {"source_static_analysis", "continuous_fuzzing"}:
+                adapter = "oss_fuzz" if intent == "continuous_fuzzing" else "code_analysis"
+                return RouteDecision(
+                    shelf="code" if adapter == "code_analysis" else "binary",
+                    adapter=adapter,
+                    reason=f"Source repository requires {intent}.",
+                )
             return RouteDecision(
                 shelf="code",
                 adapter="code_analysis",

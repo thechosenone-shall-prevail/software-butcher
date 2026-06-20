@@ -14,6 +14,10 @@ import requests
 
 DEFAULT_HEXSTRIKE_SERVER = os.environ.get("HEXSTRIKE_URL", "http://127.0.0.1:8888")
 DEFAULT_REQUEST_TIMEOUT = int(os.environ.get("HEXSTRIKE_TIMEOUT", "60"))
+# Separate connect timeout prevents hanging when the server accepts the TCP
+# socket but never finishes the HTTP handshake (common with Metasploit/Sliver
+# side-effects or a half-started Flask process).
+_CONNECT_TIMEOUT = int(os.environ.get("HEXSTRIKE_CONNECT_TIMEOUT", "5"))
 
 
 class HexstrikeServerUnavailableError(RuntimeError):
@@ -30,6 +34,7 @@ class HexstrikeApiClient:
     def __init__(self, server_url: str = DEFAULT_HEXSTRIKE_SERVER, timeout: int = DEFAULT_REQUEST_TIMEOUT) -> None:
         self.server_url = server_url.rstrip("/")
         self.timeout = timeout
+        self.connect_timeout = _CONNECT_TIMEOUT
         self.session = requests.Session()
 
     # ── Health / Liveness ──────────────────────────────────────────────────
@@ -67,7 +72,10 @@ class HexstrikeApiClient:
     ) -> dict[str, Any]:
         url = f"{self.server_url}/{endpoint.lstrip('/')}"
         try:
-            response = self.session.get(url, params=params or {}, timeout=timeout or self.timeout)
+            # Use (connect_timeout, read_timeout) tuple so a server that accepts
+            # the TCP connection but never replies doesn't block indefinitely.
+            t = (self.connect_timeout, timeout or self.timeout)
+            response = self.session.get(url, params=params or {}, timeout=t)
             response.raise_for_status()
             return response.json()
         except requests.RequestException as exc:
@@ -81,7 +89,9 @@ class HexstrikeApiClient:
     ) -> dict[str, Any]:
         url = f"{self.server_url}/{endpoint.lstrip('/')}"
         try:
-            response = self.session.post(url, json=json_data, timeout=timeout or self.timeout)
+            # Use (connect_timeout, read_timeout) tuple — see safe_get comment.
+            t = (self.connect_timeout, timeout or self.timeout)
+            response = self.session.post(url, json=json_data, timeout=t)
             response.raise_for_status()
             return response.json()
         except requests.RequestException as exc:

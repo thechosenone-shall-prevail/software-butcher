@@ -20,6 +20,10 @@ SPAWN_ON_CONFLICT = 2
 MAX_BRANCHES = 5
 CONVERGENCE_STOP_THRESHOLD = 0.75
 HIGH_VALUE_CONFIDENCE = 0.65
+# Minimum total evidence pieces across all clusters before convergence-stop
+# can lock exploration into validation mode.  Prevents a single failed/low-
+# confidence finding from triggering validation_mode on the very first step.
+MIN_EVIDENCE_FOR_CONVERGENCE = 4
 
 
 @dataclass
@@ -66,6 +70,16 @@ class ProgressiveConvergenceSearch:
 
         max_conv = max((c.convergence_score for c in clusters.values()), default=0.0)
         if max_conv >= CONVERGENCE_STOP_THRESHOLD:
+            # Defense-in-depth: require minimum accumulated evidence before
+            # locking into validation mode.  A single finding (e.g. "server
+            # unavailable") should never halt exploration.
+            total_evidence = sum(c.evidence_count for c in clusters.values())
+            if total_evidence < MIN_EVIDENCE_FOR_CONVERGENCE:
+                self.state.active_branches = INITIAL_BRANCHES
+                return INITIAL_BRANCHES, (
+                    f"primary_path: convergence score {max_conv:.2f} reached but "
+                    f"evidence too thin ({total_evidence}/{MIN_EVIDENCE_FOR_CONVERGENCE}) — keep exploring"
+                )
             self.state.validation_mode = True
             self.state.active_branches = 1
             return 1, f"convergence_stop: score {max_conv:.2f} >= {CONVERGENCE_STOP_THRESHOLD}"

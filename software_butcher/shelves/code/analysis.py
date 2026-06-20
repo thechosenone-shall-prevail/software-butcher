@@ -23,6 +23,16 @@ class CodeAnalysisAdapter:
     def execute(self, plan: dict) -> AdapterResult:
         request = plan["request"]
         root = Path(request.target)
+        source_url = request.options.get("source_url") if request.options else None
+
+        if (not root.exists() or not root.is_dir()) and source_url:
+            return AdapterResult(
+                adapter=self.name,
+                success=False,
+                summary=f"Source checkout missing for {request.target}; clone {source_url} first.",
+                raw={"plan": str(plan), "source_url": source_url},
+            )
+
         if not root.exists() or not root.is_dir():
             return AdapterResult(adapter=self.name, success=False, summary=f"Source path is not a directory: {root}", raw={"plan": str(plan)})
 

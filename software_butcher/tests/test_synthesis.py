@@ -1,11 +1,15 @@
 """Tests for synthesis verdict generation."""
 
 from software_butcher.state.schema import Finding
+from software_butcher.state.store import FindingStore
+from software_butcher.synthesis.lanes import build_assessment_lanes
 from software_butcher.synthesis.report import Synthesizer
 
 
 def test_empty_findings_secure():
-    verdict = Synthesizer()._verdict([])
+    store = FindingStore("unused.json")
+    lanes = build_assessment_lanes([])
+    verdict = Synthesizer()._verdict([], lanes, store)
     assert verdict.name == "secure"
 
 
@@ -21,7 +25,11 @@ def test_admin_surface_partially_hardened():
             asset_type="web_endpoint",
         )
     ]
-    verdict = Synthesizer()._verdict(findings)
+    store = FindingStore("unused.json")
+    for finding in findings:
+        store.ingest_finding(finding)
+    lanes = build_assessment_lanes(list(store.findings.values()))
+    verdict = Synthesizer()._verdict(list(store.findings.values()), lanes, store)
     assert verdict.name == "partially_hardened"
 
 

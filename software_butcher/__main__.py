@@ -62,6 +62,7 @@ def main() -> None:
     run_parser.add_argument("--max-branches", type=int, default=5, help="PCS branch ceiling (default: 5)")
     run_parser.add_argument("--no-adaptive-pcs", action="store_true", help="Disable PCS; always run max-branches per step")
     run_parser.add_argument("--no-new-limit", type=int, default=5, help="Stop after N consecutive steps with no new findings")
+    run_parser.add_argument("--fresh", action="store_true", help="Ignore existing workspace state and start a new run")
     run_parser.add_argument("--json", action="store_true")
 
     synth_parser = subparsers.add_parser("synthesize", help="Generate a cited technical verdict from finding state")
@@ -106,9 +107,13 @@ def main() -> None:
 
         scope = Scope.load(args.scope)
         asset = classify_target(args.target)
-        project = ButcherProject(args.workspace, scope)
+        project = ButcherProject(args.workspace, scope, resume=not args.fresh)
         project.add_asset(asset)
-        project.seed_asset(asset)
+        if project.resumed:
+            if not project.findings.base_target:
+                project.findings.set_base_target(asset.locator)
+        else:
+            project.seed_asset(asset)
 
         health = FrameworkHealth()
         llm_client = create_openrouter_client()
@@ -123,14 +128,21 @@ def main() -> None:
             adaptive_pcs=not args.no_adaptive_pcs,
             llm_client=llm_client,
             advisor=advisor,
+            on_finding_ingested=project.process_finding,
         )
         events = brain.run(asset)
         project.save()
 
-        report = Synthesizer().synthesize(project.findings, llm_client=llm_client)
+        report = Synthesizer().synthesize(
+            project.findings,
+            llm_client=llm_client,
+            inventory=project.inventory,
+        )
 
         payload = {
             "asset": asset.to_dict(),
+            "assets": project.inventory.to_list(),
+            "resumed": project.resumed,
             "workspace": str(Path(args.workspace)),
             "framework_health": {name: status.to_dict() for name, status in health.check_all().items()},
             "events": [_jsonable(event) for event in events],

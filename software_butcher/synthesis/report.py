@@ -8,8 +8,10 @@ import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from software_butcher.core.assets import AssetInventory
 from software_butcher.state.schema import Finding
 from software_butcher.state.store import FindingStore
+from software_butcher.synthesis.lanes import AssessmentLane, build_assessment_lanes, lane_overview_markdown
 from software_butcher.synthesis.verdict import Verdict
 
 
@@ -19,6 +21,7 @@ class TechnicalReport:
     findings: list[dict] = field(default_factory=list)
     attack_chain: list[str] = field(default_factory=list)
     open_hypotheses: list[str] = field(default_factory=list)
+    lanes: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         payload = asdict(self)
@@ -30,6 +33,8 @@ class TechnicalReport:
             f"# Software Butcher Verdict: {self.verdict.name}",
             "",
             self.verdict.summary,
+            "",
+            lane_overview_markdown([AssessmentLane(**lane) for lane in self.lanes]),
             "",
             "## Cited Findings",
         ]
@@ -93,8 +98,8 @@ You must output a JSON object exactly matching this schema:
 }
 
 Rules for the 'name' (Verdict):
-- 'compromised': ONLY if there is confirmed evidence of an exploitable or executed attack path (e.g. shell, RCE, data exfiltration).
-- 'partially_hardened': If interesting attack surface or risky evidence was found (e.g. auth bypass candidate, open sensitive ports), but no complete exploit chain is confirmed.
+- 'compromised': ONLY if there is confirmed evidence of an exploitable or executed attack path (e.g. shell, RCE, flags, data exfiltration).
+- 'partially_hardened': If interesting attack surface or risky evidence was found (e.g. auth bypass candidate, open sensitive ports, EOL stack), but no complete exploit chain is confirmed.
 - 'secure': If no exploitable path was found.
 
 Rules for 'cited_findings':
@@ -104,9 +109,21 @@ Rules for 'reproduction_steps' and 'fixes':
 - Provide actionable, evidence-backed steps and recommendations based ONLY on the findings.
 """
 
-    def synthesize(self, store: FindingStore, llm_client: Any | None = None) -> TechnicalReport:
+    def synthesize(
+        self,
+        store: FindingStore,
+        llm_client: Any | None = None,
+        inventory: AssetInventory | None = None,
+    ) -> TechnicalReport:
         findings = list(store.findings.values())
-        verdict = self._verdict(findings, llm_client)
+        lanes = build_assessment_lanes(
+            findings,
+            inventory=inventory,
+            engagement_phase=store.engagement.phase,
+            session_store=store.session_store,
+            flags_found=store.engagement.flags_found,
+        )
+        verdict = self._verdict(findings, lanes, store, llm_client)
         cited = self._cited_findings(findings)
         return TechnicalReport(
             verdict=verdict,
@@ -117,9 +134,16 @@ Rules for 'reproduction_steps' and 'fixes':
                 for item in store.queue.to_list()
                 if item["status"] in {"pending", "in_progress"}
             ],
+            lanes=[lane.to_dict() for lane in lanes],
         )
 
-    def _verdict(self, findings: list[Finding], llm_client: Any | None = None) -> Verdict:
+    def _verdict(
+        self,
+        findings: list[Finding],
+        lanes: list[AssessmentLane],
+        store: FindingStore,
+        llm_client: Any | None = None,
+    ) -> Verdict:
         if not findings:
             return Verdict(
                 name="secure",
@@ -131,6 +155,7 @@ Rules for 'reproduction_steps' and 'fixes':
         text = self._text(interactive)
         confirmed = [finding for finding in active if finding.status == "confirmed"]
         cited = [finding.id for finding in self._cited_findings(findings)]
+        lane_summary = self._lane_summary(lanes, store.base_target)
 
         if llm_client:
             try:
@@ -138,22 +163,29 @@ Rules for 'reproduction_steps' and 'fixes':
                     f"- [{f.status}] {f.id}: {f.hypothesis} (conf: {f.confidence})\n  Evidence: {f.evidence}"
                     for f in active
                 ])
+                lane_text = "\n".join(f"- {lane.name}: {lane.status} — {lane.summary}" for lane in lanes)
                 sys.stderr.write("\n[Synthesis] Consulting LLM for final verdict...\n")
                 model_name = os.environ.get("LLM_MODEL") or os.environ.get("OPENROUTER_MODEL") or "gpt-oss-120b"
                 response = llm_client.chat.completions.create(
                     model=model_name,
                     messages=[
                         {"role": "system", "content": self.LLM_SYNTHESIS_PROMPT},
-                        {"role": "user", "content": f"Analyze these findings and generate the JSON report:\n\n{findings_summary}"},
+                        {"role": "user", "content": (
+                            f"Assessment lanes:\n{lane_text}\n\n"
+                            f"Findings:\n{findings_summary}"
+                        )},
                     ],
                     response_format={"type": "json_object"},
                     max_tokens=1000,
                 )
                 content = response.choices[0].message.content
                 result = json.loads(content) if content else {}
+                summary = result.get("summary", "LLM verdict generated.")
+                if lane_summary and lane_summary not in summary:
+                    summary = f"{summary} {lane_summary}"
                 return Verdict(
                     name=result.get("name", "secure"),
-                    summary=result.get("summary", "LLM verdict generated."),
+                    summary=summary,
                     cited_findings=result.get("cited_findings", cited),
                     reproduction_steps=result.get("reproduction_steps", []),
                     fixes=result.get("fixes", []),
@@ -161,31 +193,68 @@ Rules for 'reproduction_steps' and 'fixes':
             except Exception as exc:
                 sys.stderr.write(f"[Synthesis] LLM synthesis failed ({exc}), falling back to keyword matching.\n")
 
-        if confirmed and any(signal in text for signal in self.COMPROMISE_SIGNALS):
+        if self._is_compromised(store, lanes, confirmed, text):
             return Verdict(
                 name="compromised",
-                summary="Confirmed evidence indicates an exploitable or executed attack path.",
+                summary=f"Confirmed compromise evidence across one or more lanes. {lane_summary}".strip(),
                 cited_findings=cited,
-                reproduction_steps=self._repro_steps(confirmed),
-                fixes=self._fixes(findings),
+                reproduction_steps=self._repro_steps(confirmed or active),
+                fixes=self._fixes(findings, lanes),
             )
 
-        if any(signal in text for signal in self.HARDENING_SIGNALS):
-            has_meaningful = any(f.confidence >= 0.6 for f in interactive)
-            if has_meaningful:
-                return Verdict(
-                    name="partially_hardened",
-                    summary="Interesting attack surface or risky evidence was found, but no complete exploit chain is confirmed.",
-                    cited_findings=cited,
-                    reproduction_steps=self._repro_steps(findings),
-                    fixes=self._fixes(findings),
-                )
+        if self._is_partially_hardened(lanes, interactive, text):
+            return Verdict(
+                name="partially_hardened",
+                summary=f"Attack surface or risky evidence found without a full confirmed chain. {lane_summary}".strip(),
+                cited_findings=cited,
+                reproduction_steps=self._repro_steps(findings),
+                fixes=self._fixes(findings, lanes),
+            )
 
         return Verdict(
             name="secure",
-            summary="No exploitable path was found in the current evidence set.",
+            summary=f"No exploitable path confirmed in the current evidence set. {lane_summary}".strip(),
             cited_findings=cited,
         )
+
+    @staticmethod
+    def _is_compromised(
+        store: FindingStore,
+        lanes: list[AssessmentLane],
+        confirmed: list[Finding],
+        text: str,
+    ) -> bool:
+        if store.engagement.flags_found:
+            return True
+        if any(lane.name == "post_exploit" and lane.status == "confirmed" for lane in lanes):
+            return True
+        active_shells = [
+            s for s in store.session_store.shell_sessions.sessions.values() if s.active
+        ]
+        if active_shells and confirmed:
+            return True
+        return bool(confirmed and any(signal in text for signal in Synthesizer.COMPROMISE_SIGNALS))
+
+    @staticmethod
+    def _is_partially_hardened(
+        lanes: list[AssessmentLane],
+        interactive: list[Finding],
+        text: str,
+    ) -> bool:
+        if any(lane.status in {"exposed", "confirmed"} for lane in lanes):
+            return True
+        if any(signal in text for signal in Synthesizer.HARDENING_SIGNALS):
+            return any(f.confidence >= 0.6 for f in interactive)
+        return False
+
+    @staticmethod
+    def _lane_summary(lanes: list[AssessmentLane], base_target: str) -> str:
+        active = [lane for lane in lanes if lane.finding_count or lane.asset_count]
+        if not active:
+            return ""
+        parts = [f"{lane.name}={lane.status}" for lane in active]
+        prefix = f"Target {base_target}:" if base_target else "Assessment:"
+        return f"{prefix} " + ", ".join(parts) + "."
 
     @staticmethod
     def _cited_findings(findings: list[Finding]) -> list[Finding]:
@@ -208,15 +277,21 @@ Rules for 'reproduction_steps' and 'fixes':
         return steps
 
     @staticmethod
-    def _fixes(findings: list[Finding]) -> list[str]:
+    def _fixes(findings: list[Finding], lanes: list[AssessmentLane]) -> list[str]:
         text = Synthesizer._text(findings)
         fixes = []
+        if any(lane.name == "web" and lane.status in {"exposed", "confirmed"} for lane in lanes):
+            fixes.append("Review web access control, session handling, and exposed endpoints on cited paths.")
+        if any(lane.name == "binary" and lane.status in {"exposed", "confirmed"} for lane in lanes):
+            fixes.append("Run focused binary review/fuzzing on cited executables and replace unsafe memory handling.")
+        if any(lane.name == "supply_chain" and lane.status in {"exposed", "confirmed"} for lane in lanes):
+            fixes.append("Upgrade EOL components and audit upstream source for known vulnerability classes.")
+        if any(lane.name == "post_exploit" and lane.status == "confirmed" for lane in lanes):
+            fixes.append("Assume breach: rotate credentials, review persistence, and validate detection coverage.")
+        if any(lane.name == "infrastructure" and lane.status in {"exposed", "confirmed"} for lane in lanes):
+            fixes.append("Review cloud/container/AD exposure, segmentation, and hardening baselines.")
         if "ldap" in text or "smb" in text or "kerberos" in text:
             fixes.append("Review AD exposure, SMB signing, LDAP binding, and segmentation controls.")
-        if "admin" in text or "auth" in text or "login" in text:
-            fixes.append("Review access control, session handling, and authentication behavior on cited paths.")
-        if "binary" in text or "overflow" in text or "strcpy" in text or "memcpy" in text:
-            fixes.append("Run focused binary review/fuzzing on cited executable paths and replace unsafe memory handling.")
         if "cloud" in text or "iam" in text:
             fixes.append("Review cloud IAM permissions, audit logging, and attack simulation results.")
-        return fixes
+        return list(dict.fromkeys(fixes))

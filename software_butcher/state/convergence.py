@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Iterable
+from urllib.parse import urlsplit
 
 from software_butcher.state.schema import ConvergenceCluster, Finding
 
@@ -22,6 +23,40 @@ THEME_SIGNALS: list[tuple[str, tuple[str, ...]]] = [
     ("flag_root", ("root flag", "root.txt", "proof.txt")),
 ]
 
+WEB_AUTH_PATH_SIGNALS = ("login", "admin", "auth", "dashboard", "portal", "hall", "signin", "session")
+
+
+def _finding_text(finding: Finding) -> str:
+    return " ".join(
+        [finding.hypothesis, finding.path, finding.provenance, " ".join(finding.evidence), str(finding.metadata)]
+    ).lower()
+
+
+def _host_key(path: str) -> str:
+    parsed = urlsplit(path)
+    if parsed.netloc:
+        return parsed.netloc.lower()
+    return path.split("/")[0].lower()
+
+
+def normalize_cluster_theme(finding: Finding, candidate: str) -> str:
+    """Collapse similar surface themes so PCS can converge across wording variants."""
+    if not candidate.startswith("surface:"):
+        return candidate
+
+    text = _finding_text(finding)
+    for theme, signals in THEME_SIGNALS:
+        if any(signal in text for signal in signals):
+            return theme
+
+    segment = candidate.replace("surface:", "").lower()
+    if any(signal in segment for signal in WEB_AUTH_PATH_SIGNALS) or any(
+        signal in text for signal in ("login", "auth", "session", "dashboard")
+    ):
+        return f"web_auth:{_host_key(finding.path)}"
+
+    return f"surface_host:{_host_key(finding.path)}"
+
 
 def cluster_theme(finding: Finding) -> str:
     """Map a finding to a convergence theme for PCS aggregation."""
@@ -31,16 +66,15 @@ def cluster_theme(finding: Finding) -> str:
     if capability.endswith("_confirmed"):
         return capability.replace("_confirmed", "")
 
-    text = " ".join(
-        [finding.hypothesis, finding.path, finding.provenance, " ".join(finding.evidence), str(finding.metadata)]
-    ).lower()
+    text = _finding_text(finding)
 
     for theme, signals in THEME_SIGNALS:
         if any(signal in text for signal in signals):
             return theme
 
     path_key = finding.path.rstrip("/").split("/")[-1] or finding.path
-    return f"surface:{path_key[:48]}"
+    raw = f"surface:{path_key[:48]}"
+    return normalize_cluster_theme(finding, raw)
 
 
 def recompute_clusters(findings: Iterable[Finding]) -> dict[str, ConvergenceCluster]:
@@ -82,7 +116,21 @@ def recompute_clusters(findings: Iterable[Finding]) -> dict[str, ConvergenceClus
         confirmed_boost = 0.15 if any(
             f.status == "confirmed" for f in findings_list if f.id in finding_ids
         ) else 0.0
-        cluster.convergence_score = round(min(1.0, max(0.0, agreement - conflict_penalty + confirmed_boost)), 3)
+        raw = agreement - conflict_penalty + confirmed_boost
+        # Convergence requires multiple independent branches to be meaningful.
+        # A single branch landing on a theme cannot exceed 0.50, so it can
+        # never reach the 0.75 convergence-stop threshold on its own (even if
+        # HexStrike is down and returns only one low-quality finding).
+        # 1 branch  → max 0.50  (explore, never lock)
+        # 2 branches → max 0.70  (can confirm, cannot stop exploration)
+        # 3+ branches → uncapped (legitimate convergence)
+        if supporting <= 1:
+            cap = 0.50
+        elif supporting == 2:
+            cap = 0.70
+        else:
+            cap = 1.0
+        cluster.convergence_score = round(min(cap, max(0.0, raw)), 3)
 
     return by_theme
 
