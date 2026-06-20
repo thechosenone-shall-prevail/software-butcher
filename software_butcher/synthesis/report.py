@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import os
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -138,8 +139,9 @@ Rules for 'reproduction_steps' and 'fixes':
                     for f in active
                 ])
                 sys.stderr.write("\n[Synthesis] Consulting LLM for final verdict...\n")
+                model_name = os.environ.get("LLM_MODEL") or os.environ.get("OPENROUTER_MODEL") or "gpt-oss-120b"
                 response = llm_client.chat.completions.create(
-                    model="deepseek-chat",
+                    model=model_name,
                     messages=[
                         {"role": "system", "content": self.LLM_SYNTHESIS_PROMPT},
                         {"role": "user", "content": f"Analyze these findings and generate the JSON report:\n\n{findings_summary}"},

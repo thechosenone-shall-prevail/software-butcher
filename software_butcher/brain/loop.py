@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import sys
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 from software_butcher.brain.context import build_brain_context
 from software_butcher.brain.guards import LoopGuard
 from software_butcher.brain.hypotheses import HypothesisGenerator
-from software_butcher.brain.llm_advisor import DeepSeekAdvisor
+from software_butcher.brain.llm_advisor import OpenRouterAdvisor
 from software_butcher.brain.policy import BrainPolicy, PolicyDecision
 from software_butcher.core.adapter import AdapterRequest
 from software_butcher.core.assets import Asset
@@ -253,12 +254,12 @@ def run_brain_once(
     hypothesis_generator: HypothesisGenerator | None = None,
     router: AssetRouter | None = None,
     asset: Asset | None = None,
-    advisor: DeepSeekAdvisor | None = None,
+    advisor: OpenRouterAdvisor | None = None,
     llm_client: Any | None = None,
     branch_id: str | None = None,
 ) -> Optional[Finding]:
     """Run a single Brain iteration: pop hypothesis, route, execute, write findings."""
-    # ── DeepSeek advisor: optionally reorder the queue before popping ──────────
+    # ── LLM advisor: optionally reorder the queue before popping ──────────
     hypothesis = None
     if advisor is not None and advisor.enabled:
         pending = store.queue.pending_list()
@@ -283,7 +284,7 @@ def run_brain_once(
     # in the finding store.
     explicit_intent = hypothesis.metadata.get("intent") if hypothesis.metadata else None
 
-    # LLM-DRIVEN REASONING (Phase 2) — DeepSeek capability selector
+    # LLM-DRIVEN REASONING (Phase 2) — OpenRouter capability selector
     decision = None
     if llm_client is not None and isinstance(registry, AdapterRegistry):
         context = build_brain_context(
@@ -295,11 +296,12 @@ def run_brain_once(
         phase = store.engagement.phase
         pcs_mode = "validation" if store.pcs.state.validation_mode else "exploration"
 
-        sys.stderr.write(f"\n[Brain] Consulting DeepSeek for hypothesis: {hypothesis.path} (phase={phase}, pcs={pcs_mode})\n")
+        sys.stderr.write(f"\n[Brain] Consulting external LLM for hypothesis: {hypothesis.path} (phase={phase}, pcs={pcs_mode})\n")
 
         try:
+            model_name = os.environ.get("LLM_MODEL") or os.environ.get("OPENROUTER_MODEL") or "gpt-oss-120b"
             llm_response = llm_client.chat.completions.create(
-                model="deepseek-chat",
+                model=model_name,
                 messages=[{
                     "role": "system",
                     "content": BRAIN_SYSTEM_PROMPT
@@ -339,9 +341,9 @@ def run_brain_once(
                 options={"capability": capability} if capability else {},
             )
         except Exception as exc:
-            # DeepSeek failure should never crash the Brain loop — fall through
+            # LLM failure should never crash the Brain loop — fall through
             # to deterministic policy
-            sys.stderr.write(f"[Brain] DeepSeek call failed: {exc}. Falling back to policy.\n")
+            sys.stderr.write(f"[Brain] LLM call failed: {exc}. Falling back to policy.\n")
             decision = None
 
     if decision is None and explicit_intent:
@@ -514,7 +516,7 @@ class BrainLoop:
         hypothesis_generator: HypothesisGenerator | None = None,
         router: AssetRouter | None = None,
         llm_client: Any | None = None,
-        advisor: DeepSeekAdvisor | None = None,
+        advisor: OpenRouterAdvisor | None = None,
     ) -> None:
         self.store = store
         self.scope = scope

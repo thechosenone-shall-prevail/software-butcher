@@ -163,7 +163,7 @@ def main() -> None:
         "generate follow-up hypotheses",
     ), accent=BRAIN, title_size=13)
 
-    card(ax, (0.52, 0.72), 0.18, 0.14, "DeepSeek", (
+    card(ax, (0.52, 0.72), 0.18, 0.14, "OpenRouter / gpt-oss-120b", (
         "capability selection",
         "hypothesis priority",
         "optional — policy fallback",
@@ -193,7 +193,7 @@ def main() -> None:
     ax.text(0.415, 0.695, "read", color=SUB, fontsize=8)
     ax.text(0.535, 0.695, "write", color=SUB, fontsize=8)
 
-    # DeepSeek → Brain
+    # LLM → Brain
     arrow(ax, (0.52, 0.72), (0.48, 0.72), color=HIGHLIGHT, lw=1.4)
 
     # Branches → State

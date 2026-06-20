@@ -15,7 +15,7 @@ def build_brain_context(
     session_store: SessionStore | None = None,
     limit: int = 40,
 ) -> str:
-    """Build a structured state summary for DeepSeek capability selection."""
+    """Build a structured state summary for LLM capability selection."""
     clusters = clusters or recompute_clusters(findings)
     sorted_findings = sorted(findings, key=lambda f: f.created_at)[-limit:]
 

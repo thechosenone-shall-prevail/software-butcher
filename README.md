@@ -236,17 +236,24 @@ Example `scope.json`:
 
 > **Note:** `scope.json.example` is a comprehensive scope document. The CLI `Scope.load()` accepts both flat files and this nested format automatically.
 
-### 4. Set DeepSeek (optional but recommended)
+### 4. Configure an external LLM provider (optional)
 
-```bash
-export DEEPSEEK_API_KEY="your-key-here"
+Software Butcher can integrate with an external LLM for advisory and synthesis tasks.
+We recommend using OpenRouter with `gpt-oss-120b` (free) for general-purpose use.
+
+Example environment variables (add to `.env`):
+
+```
+# OpenRouter (preferred)
+OPENROUTER_API_KEY=sk-or-xxxxxxxxxxxxxxxx
+# Optional: select model (defaults to OpenRouter `gpt-oss-120b` free tier)
+LLM_MODEL=gpt-oss-120b
+
+# Legacy DeepSeek removed — use OpenRouter instead
+# DEEPSEEK_API_KEY is no longer used; configure OPENROUTER_API_KEY
 ```
 
-Create `.env` in the project root and the `run` command loads it automatically:
-
-```
-DEEPSEEK_API_KEY=your-key-here
-```
+The CLI will load `.env` automatically when you run `software_butcher`.
 
 ### 5. Run an assessment
 
@@ -357,7 +364,9 @@ Work items the Brain consumes:
 
 ## Brain routing
 
-When DeepSeek is available, the Brain asks for a JSON capability choice against the last 10 findings. On failure or missing key, deterministic policy takes over (`brain/policy.py`).
+When an external LLM (OpenRouter) is available, the Brain can ask it
+for a JSON capability choice against the last 10 findings. On failure or missing
+key, deterministic policy takes over (`brain/policy.py`).
 
 Capability → adapter mapping (simplified):
 
@@ -391,7 +400,7 @@ The Dockerfile ships a Kali-based image with core tools pre-installed. The conta
 ```
 software-butcher/
 ├── software_butcher/
-│   ├── brain/           # Loop, policy, hypotheses, DeepSeek advisor
+│   ├── brain/           # Loop, policy, hypotheses, LLM advisor
 │   ├── shelves/         # HexStrike, web, binary, framework adapters
 │   ├── state/           # Finding store, hypothesis queue, session state
 │   ├── synthesis/       # Verdict + report generation
@@ -411,7 +420,7 @@ software-butcher/
 
 | Variable | Used by | Purpose |
 |----------|---------|---------|
-| `DEEPSEEK_API_KEY` | Brain, Synthesis | LLM capability selection and verdict |
+| `OPENROUTER_API_KEY` | Brain, Synthesis | OpenRouter API key (used with `LLM_MODEL`, e.g. `gpt-oss-120b`) |
 | `HEXSTRIKE_URL` | Framework health | Override default `http://127.0.0.1:8888` |
 | `HEXSTRIKE_TIMEOUT` | HexStrike client | Request timeout seconds (default: 60) |
 | `CALDERA_URL` / `CALDERA_API_KEY` | Caldera adapter | Adversary emulation |

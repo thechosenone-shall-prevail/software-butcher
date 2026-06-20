@@ -1,6 +1,6 @@
-"""Optional DeepSeek LLM advisor for hypothesis prioritisation.
+"""Optional OpenRouter LLM advisor for hypothesis prioritisation.
 
-Reads DEEPSEEK_API_KEY from the environment (or .env loaded by the CLI).
+Reads `OPENROUTER_API_KEY` from the environment (or .env loaded by the CLI).
 When the key is absent or the API call fails the advisor returns None and
 the queue falls back to its default priority-sorted ordering.
 """
@@ -15,10 +15,10 @@ import requests
 if TYPE_CHECKING:
     from software_butcher.state.schema import Finding, Hypothesis
 
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
-DEEPSEEK_MODEL = "deepseek-chat"
-DEEPSEEK_TIMEOUT = 12
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+DEFAULT_OPENROUTER_MODEL = "gpt-oss-120b"
+OPENROUTER_TIMEOUT = 12
 
 SYSTEM_PROMPT = """You are a security testing advisor.
 You will receive a list of pending hypotheses and recent findings from an automated pentest tool.
@@ -31,11 +31,14 @@ Rules:
 - Output ONLY the hypothesis id string (e.g. hyp-abc123), nothing else."""
 
 
-class DeepSeekAdvisor:
-    """Ask DeepSeek which pending hypothesis to process next."""
+class OpenRouterAdvisor:
+    """Ask OpenRouter which pending hypothesis to process next."""
 
     def __init__(self, api_key: str | None = None) -> None:
-        self.api_key = api_key or os.environ.get(DEEPSEEK_API_KEY_ENV, "")
+        self.api_key = api_key or os.environ.get(OPENROUTER_API_KEY_ENV, "")
+        self.api_url = os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_API_URL)
+        self.model = os.environ.get("LLM_MODEL") or os.environ.get("OPENROUTER_MODEL") or DEFAULT_OPENROUTER_MODEL
+        self.timeout = int(os.environ.get("OPENROUTER_TIMEOUT", OPENROUTER_TIMEOUT))
         self.enabled = bool(self.api_key)
 
     def select_hypothesis_id(
@@ -49,13 +52,13 @@ class DeepSeekAdvisor:
         try:
             prompt = self._build_prompt(pending, findings)
             response = requests.post(
-                DEEPSEEK_API_URL,
+                self.api_url,
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": DEEPSEEK_MODEL,
+                    "model": self.model,
                     "messages": [
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
@@ -63,7 +66,7 @@ class DeepSeekAdvisor:
                     "temperature": 0.0,
                     "max_tokens": 32,
                 },
-                timeout=DEEPSEEK_TIMEOUT,
+                timeout=self.timeout,
             )
             response.raise_for_status()
             raw_answer = response.json()["choices"][0]["message"]["content"].strip()

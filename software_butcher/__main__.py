@@ -9,11 +9,11 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
 from software_butcher.brain.loop import BrainLoop
-from software_butcher.brain.llm_advisor import DeepSeekAdvisor
+from software_butcher.brain.llm_advisor import OpenRouterAdvisor
 from software_butcher.core.classifier import classify_target
 from software_butcher.core.framework_config import FrameworkConfigSet
 from software_butcher.core.health import FrameworkHealth
-from software_butcher.core.llm import create_deepseek_client
+from software_butcher.core.llm import create_openrouter_client
 from software_butcher.core.scope import Scope
 from software_butcher.project import ButcherProject
 from software_butcher.state.store import FindingStore
@@ -111,8 +111,8 @@ def main() -> None:
         project.seed_asset(asset)
 
         health = FrameworkHealth()
-        llm_client = create_deepseek_client()
-        advisor = DeepSeekAdvisor()
+        llm_client = create_openrouter_client()
+        advisor = OpenRouterAdvisor()
 
         brain = BrainLoop(
             project.findings,
@@ -161,7 +161,7 @@ def main() -> None:
     if args.command == "synthesize":
         _load_dotenv()
         store = FindingStore.load(args.state)
-        llm_client = create_deepseek_client()
+        llm_client = create_openrouter_client()
         report = Synthesizer().synthesize(store, llm_client=llm_client)
         if args.json:
             print(json.dumps(report.to_dict(), indent=2))

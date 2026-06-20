@@ -30,7 +30,7 @@ class HexstrikeAdapter:
     """Adapter around the HexStrike Flask API and legacy argv execution.
 
     Expanded to expose ALL server tool categories as capabilities so the
-    Brain's DeepSeek LLM can route to any tool on the server.
+    Brain's external LLM (OpenRouter) can route to any tool on the server.
     """
 
     name = "hexstrike"
@@ -228,7 +228,7 @@ class HexstrikeAdapter:
         }
 
         # ── Capability-based dispatch (NEW) ────────────────────────────────
-        # If the Brain's DeepSeek selected a specific capability, dispatch
+        # If the Brain's LLM selected a specific capability, dispatch
         # directly to the structured server endpoint.
         direct_result = self._execute_capability(capability, request.target, request.options)
         if direct_result is not None:
