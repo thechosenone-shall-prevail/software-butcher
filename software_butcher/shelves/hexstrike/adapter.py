@@ -251,7 +251,7 @@ class HexstrikeAdapter:
                 crawl_result = self.client.execute_command(
                     f"curl -sL --max-time 10 {cookie_header}{quoted_target}",
                     use_cache=False,
-                    timeout=15,
+                    timeout=self.client.timeout,
                 )
                 raw_output["html_crawl"] = crawl_result
 
@@ -259,7 +259,7 @@ class HexstrikeAdapter:
         if run_tools:
             for tool in plan.get("selected_tools", [])[:3]:
                 command = self._build_tool_command(tool, request.target)
-                result = self.client.execute_command(command, use_cache=False, timeout=15)
+                result = self.client.execute_command(command, use_cache=False, timeout=self.client.timeout)
                 raw_output["tool_runs"].append({"tool": tool, "command": command, "result": result})
                 if not result.get("success", False):
                     raw_output["success"] = False
@@ -313,6 +313,7 @@ class HexstrikeAdapter:
             # Bug bounty workflows
             "bugbounty_recon": lambda: self.client.bugbounty_recon(target, **safe_opts),
             "bugbounty_comprehensive": lambda: self.client.bugbounty_comprehensive(target, **safe_opts),
+            "cve_lookup": lambda: self._run_cve_lookup(target, safe_opts),
         }
 
         handler = dispatch.get(capability)
@@ -322,6 +323,13 @@ class HexstrikeAdapter:
             except Exception as exc:
                 return {"error": str(exc), "success": False}
         return None
+
+    def _run_cve_lookup(self, target: str, options: dict[str, Any]) -> dict[str, Any]:
+        technology = options.get("technology") or target
+        cve_id = options.get("cve_id", "")
+        if cve_id:
+            return self.client.generate_exploit_from_cve(cve_id=cve_id, **options)
+        return self.client.detect_technologies(technology, **options)
 
     @staticmethod
     def _intent_to_capability(intent: str) -> str:
@@ -351,6 +359,7 @@ class HexstrikeAdapter:
             "technology_fingerprint": "technology_fingerprint",
             "bugbounty_recon": "bugbounty_recon",
             "bugbounty_comprehensive": "bugbounty_comprehensive",
+            "cve_lookup": "cve_lookup",
         }
         return mapping.get(intent, "endpoint_discovery")
 

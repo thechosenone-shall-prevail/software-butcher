@@ -1,18 +1,13 @@
 """Optional DeepSeek LLM advisor for hypothesis prioritisation.
 
-Reads DEEPSEEK_API_KEY from the environment.  When the key is absent or the
-API call fails the advisor returns None and the queue falls back to its
-default priority-sorted ordering — the Brain loop is not affected at all.
-
-Usage (set once in your shell before running):
-    $env:DEEPSEEK_API_KEY = "sk-ff53efae1129475484512fe14936fc35"   # PowerShell
-    export DEEPSEEK_API_KEY="sk-ff53efae1129475484512fe14936fc35"   # bash
+Reads DEEPSEEK_API_KEY from the environment (or .env loaded by the CLI).
+When the key is absent or the API call fails the advisor returns None and
+the queue falls back to its default priority-sorted ordering.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import requests
@@ -23,7 +18,7 @@ if TYPE_CHECKING:
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_API_KEY_ENV = "DEEPSEEK_API_KEY"
 DEEPSEEK_MODEL = "deepseek-chat"
-DEEPSEEK_TIMEOUT = 12  # seconds — fast enough for interactive use
+DEEPSEEK_TIMEOUT = 12
 
 SYSTEM_PROMPT = """You are a security testing advisor.
 You will receive a list of pending hypotheses and recent findings from an automated pentest tool.
@@ -37,11 +32,7 @@ Rules:
 
 
 class DeepSeekAdvisor:
-    """Ask DeepSeek which pending hypothesis to process next.
-
-    Falls back silently to the queue's priority ordering when the key is
-    absent, the API is unreachable, or the model returns an unrecognised id.
-    """
+    """Ask DeepSeek which pending hypothesis to process next."""
 
     def __init__(self, api_key: str | None = None) -> None:
         self.api_key = api_key or os.environ.get(DEEPSEEK_API_KEY_ENV, "")
@@ -52,7 +43,6 @@ class DeepSeekAdvisor:
         pending: list["Hypothesis"],
         findings: list["Finding"],
     ) -> str | None:
-        """Return the id of the best hypothesis to investigate, or None on any failure."""
         if not self.enabled or not pending:
             return None
 
@@ -80,7 +70,7 @@ class DeepSeekAdvisor:
             valid_ids = {h.id for h in pending}
             if raw_answer in valid_ids:
                 return raw_answer
-        except Exception:  # noqa: BLE001  — never crash the Brain loop
+        except Exception:
             pass
         return None
 
