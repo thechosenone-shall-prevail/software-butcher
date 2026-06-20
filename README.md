@@ -1,18 +1,18 @@
 # Software Butcher
 
-We cut through legacy bloat to expose the vulnerable core for inspection —
-one sharp mind, one ruthless process, no committee debates.
+Slicing away the corporate fat to leave your vulnerabilities bleeding on the floor. One chef, one cleaver, zero chatter.
 
 Autonomous security assessment harness built around one idea: let an
 opinionated reasoning engine and a collection of lightweight "shelves" run
 continuous, evidence-driven assessment workflows and produce an actionable
-technical verdict.
+technical verdict — clear, humane, and accountable.
 
 Software Butcher composes several focused components to automate modern red
 team and bug-bounty workflows:
 
-- The Brain: an LLM-driven advisor (DeepSeek) and deterministic policy that
-  selects the next capability to run against a hypothesis.
+- The Brain: an LLM-driven advisor and deterministic policy that selects
+  the next capability to run against a hypothesis — a restrained voice
+  that prefers evidence over speculation.
 - Shelves & Adapters: thin adapters that translate Brain intent into concrete
   tool executions (HexStrike is the primary shelf/adapter used by default).
 - Runner & Artifacts: `SafeRunner` and `ShelfRunner` drive external tools,
@@ -76,7 +76,8 @@ See `LICENSE` in the repository root.
 | No multi-agent orchestration | One Brain, not role-playing agents with message explosion |
 | Finding state is truth | `finding_state.json` is auditable, diffable, resumable |
 | Shelf executes, Brain thinks | Tools run; interpretation and routing live in the Brain |
-| Models are interchangeable | DeepSeek today; another frontier model tomorrow |
+| Models are configurable | An LLM advisor may be used when configured; deterministic
+|                  | policies remain the reliable fallback |
 | Ensemble via state, not swarms | Parallel reasoning passes converge on shared findings |
 
 ---
@@ -97,11 +98,11 @@ Additional adapters plug in without changing the Brain contract:
 
 ### Brain — reasoning loop
 
-The Brain owns the hypothesis queue and finding state:  
+We slice right through the legacy fat to serve up the juicy, vulnerable meat underneath
 *The hunter that chooses which component to target next.*
 
-1. Pop the next hypothesis (priority-sorted, optionally reordered by DeepSeek)
-2. Read current findings and decide intent/capability (DeepSeek JSON or deterministic policy fallback)
+1. Pop the next hypothesis (priority-sorted, optionally reordered by the advisor)
+2. Read current findings and decide intent/capability (LLM advisor JSON or deterministic policy fallback)
 3. Route to the correct shelf adapter
 4. Interpret adapter output into structured findings
 5. Generate follow-up hypotheses (SQLi, XSS, AD, cloud, auth escalation, …)
@@ -109,8 +110,9 @@ The Brain owns the hypothesis queue and finding state:
 
 ### Brain — Progressive Convergence Search (PCS)
 
-The Brain does **not** always run N parallel branches. PCS adapts:  
-*We don't guess; we zero in on the weakest spot and act with surgical precision.*
+The Brain does **not** always run N parallel branches. PCS adapts: 
+
+We don't guess; we smell blood and carve precisely where it hurts.
 
 | Trigger | Branches | Behavior |
 |---------|----------|----------|
@@ -119,7 +121,8 @@ The Brain does **not** always run N parallel branches. PCS adapts:
 | Conflicting path themes | **+2** (up to 5) | Widen search |
 | Convergence score ≥ 0.75 | **1** | Validation mode — confirm, don't branch |
 
-Each finding carries **emergent confidence**:
+Each finding carries **emergent confidence**: a calm, numeric sense of how
+much the evidence truly supports the claim.
 
 ```json
 {
@@ -154,14 +157,15 @@ Findings promote `hypothesis` → `confirmed` when:
 
 ### Synthesis — verdict layer
 
-After the Brain finishes (or on demand), Synthesis reads the complete finding state and produces:  
-*Presenting concise, evidence-backed facts of how the perimeter was compromised.*
+ Laying out the raw, bleeding facts of how your perimeter got skinned.
 
 - **Verdict**: `secure` · `partially_hardened` · `compromised`
 - Cited findings, reproduction steps, and remediation hints
 - Markdown or JSON output
 
-With `DEEPSEEK_API_KEY` set, Synthesis can use LLM reasoning; otherwise it falls back to keyword-based classification.
+Synthesis prefers transparent, auditable rules; when an LLM is configured it
+can assist with phrasing and summarization, but verdicts always cite the
+underlying evidence.
 
 ---
 
