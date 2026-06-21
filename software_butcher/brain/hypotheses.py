@@ -11,6 +11,7 @@ from software_butcher.core.asset_classifier import is_static_asset
 from software_butcher.core.meta_utils import as_dict, as_dict_list
 from software_butcher.core.path_relevance import is_noise_path, score_path
 from software_butcher.state.engagement import normalize_engagement_type
+from software_butcher.core.app_root import should_defer_out_of_app_hypothesis
 from software_butcher.core.url_utils import base_web_url
 from software_butcher.state.path_graph import parent_path
 from software_butcher.state.schema import Finding, Hypothesis
@@ -41,7 +42,13 @@ class HypothesisGenerator:
     EXPLOIT_SIGNALS = ("cve-", "exploit", "rce", "remote code execution", "command injection")
     XSS_SIGNALS = ("xss", "cross-site scripting", "reflected", "stored xss", "dom-based")
 
-    def generate(self, finding: Finding, *, engagement_type: str = "assessment") -> list[Hypothesis]:
+    def generate(
+        self,
+        finding: Finding,
+        *,
+        engagement_type: str = "assessment",
+        base_target: str = "",
+    ) -> list[Hypothesis]:
         generated: list[Hypothesis] = []
         et = normalize_engagement_type(engagement_type)
 
@@ -128,9 +135,19 @@ class HypothesisGenerator:
                         )
 
         meta = finding.metadata or {}
+        scope_findings = [finding]
+
+        def _defer_url(url: str) -> bool:
+            return should_defer_out_of_app_hypothesis(
+                url,
+                scope_findings,
+                base_target=base_target,
+                engagement_type=et,
+            )
+
         if meta.get("content_analysis"):
             page_type = str(meta.get("page_type") or "")
-            if page_type == "phpinfo":
+            if page_type == "phpinfo" and not _defer_url(finding.path):
                 generated.append(
                     Hypothesis(
                         path=finding.path,
@@ -146,7 +163,7 @@ class HypothesisGenerator:
                         },
                     )
                 )
-            if page_type == "phpmyadmin":
+            if page_type == "phpmyadmin" and not _defer_url(finding.path):
                 generated.append(
                     Hypothesis(
                         path=finding.path,
@@ -311,7 +328,7 @@ class HypothesisGenerator:
                     for c in conclusions
                 )
 
-                if page_type in ("phpinfo", "phpmyadmin"):
+                if page_type in ("phpinfo", "phpmyadmin") and not _defer_url(url):
                     generated.append(
                         Hypothesis(
                             path=url,
@@ -329,11 +346,15 @@ class HypothesisGenerator:
                             },
                         )
                     )
-                elif score_path(
-                    url,
-                    page_context=" ".join(conclusions),
-                    organically_discovered=True,
-                ) >= 0.85:
+                elif (
+                    score_path(
+                        url,
+                        page_context=" ".join(conclusions),
+                        organically_discovered=True,
+                    )
+                    >= 0.85
+                    and not _defer_url(url)
+                ):
                     generated.append(
                         Hypothesis(
                             path=url,
@@ -351,7 +372,7 @@ class HypothesisGenerator:
                         )
                     )
 
-                if page_type == "phpmyadmin" or mysql_signals or has_resource_exhaustion:
+                if (page_type == "phpmyadmin" or mysql_signals or has_resource_exhaustion) and not _defer_url(url):
                     generated.append(
                         Hypothesis(
                             path=url,
@@ -372,7 +393,7 @@ class HypothesisGenerator:
 
             if finding.metadata.get("browser_final_url"):
                 bf = str(finding.metadata["browser_final_url"])
-                if score_path(bf) >= 0.5 and not is_noise_path(bf):
+                if score_path(bf) >= 0.5 and not is_noise_path(bf) and not _defer_url(bf):
                     generated.append(
                         Hypothesis(
                             path=bf,
@@ -392,7 +413,11 @@ class HypothesisGenerator:
         # re-mapping it: redirect-body leaks, security posture/CSRF, phpMyAdmin,
         # resource exhaustion, and version-gated CVE viability.
         if capability == "http_surface_map" and not is_noise_path(finding.path):
-            generated.extend(self._web_audit_followups(finding, meta))
+            generated.extend(
+                h
+                for h in self._web_audit_followups(finding, meta)
+                if not _defer_url(h.path)
+            )
             analyzed_urls = {
                 str(p.get("url", "")).rstrip("/").lower()
                 for p in meta.get("content_pages") or []

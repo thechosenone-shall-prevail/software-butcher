@@ -7,11 +7,10 @@ from typing import TYPE_CHECKING
 
 from software_butcher.core.app_root import (
     application_scope_priority_boost,
-    assessment_serializes_branches,
+    app_subtree_analysis_incomplete,
     filter_assessment_pending,
     hypothesis_in_application_scope,
     infer_application_root,
-    app_scope_work_pending,
 )
 from software_butcher.core.path_relevance import hypothesis_has_evidence_lineage
 from software_butcher.core.url_utils import canonical_web_url, is_plausible_target_path
@@ -166,6 +165,8 @@ class HypothesisQueue:
         if self._engagement_type != "assessment" or app_root is None or app_root.confidence < 0.55:
             return pending
         filtered = filter_assessment_pending(pending, app_root, findings)
+        if app_subtree_analysis_incomplete(list(findings.values()), app_root):
+            return filtered
         return filtered if filtered else pending
 
     def _effective_priority(self, hypothesis: Hypothesis) -> float:
@@ -196,8 +197,9 @@ class HypothesisQueue:
         return self._next_by_id_unlocked(hypothesis_id)
 
     def _next_by_id_unlocked(self, hypothesis_id: str) -> Hypothesis | None:
-        for item in self._items.values():
-            if item.id == hypothesis_id and item.status == "pending":
+        pending = [item for item in self._items.values() if item.status == "pending"]
+        for item in self._focused_pending(pending):
+            if item.id == hypothesis_id:
                 item.status = "in_progress"
                 return item
         return self._next_unlocked()

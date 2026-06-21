@@ -613,6 +613,29 @@ def assessment_serializes_branches(
     return True, f"assessment_app_focus: app root {app_root.url} — single branch"
 
 
+def should_defer_out_of_app_hypothesis(
+    url: str,
+    findings: Iterable[Finding],
+    *,
+    base_target: str = "",
+    engagement_type: str = "assessment",
+) -> bool:
+    """Assessment: skip seeding infra/stack paths outside inferred app subtree while app work remains."""
+    if engagement_type != "assessment":
+        return False
+    findings_list = list(findings)
+    app_root = infer_application_root(findings_list, base_target)
+    if app_root is None or app_root.confidence < 0.55:
+        return False
+    if url_under_application_root(url, app_root):
+        return False
+    if not app_subtree_analysis_incomplete(findings_list, app_root):
+        return False
+    if is_infrastructure_url(url, findings_list):
+        return True
+    return is_stack_host_surface(url, findings_list)
+
+
 def filter_assessment_pending(
     pending: list[Hypothesis],
     app_root: ApplicationRoot,

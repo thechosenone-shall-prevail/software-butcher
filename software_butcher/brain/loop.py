@@ -1271,11 +1271,13 @@ def run_brain_once(
             capability=str((decision.options or {}).get("capability") or decision.intent or ""),
         ):
             if _ingest_finding(store, finding, branch_id, on_finding_ingested):
-                for generated in hypothesis_generator.generate(
+                generated = hypothesis_generator.generate(
                     finding,
                     engagement_type=getattr(store, "_engagement_type", "assessment"),
-                ):
-                    store.add_hypothesis(generated)
+                    base_target=store.base_target,
+                )
+                if generated:
+                    store.add_hypotheses(generated)
                 if primary_finding is None:
                     primary_finding = finding
     elif legacy_registry is not None:
@@ -1294,11 +1296,13 @@ def run_brain_once(
             on_finding_ingested=on_finding_ingested,
         )
         if primary_finding:
-            for generated in hypothesis_generator.generate(
+            generated = hypothesis_generator.generate(
                 primary_finding,
                 engagement_type=getattr(store, "_engagement_type", "assessment"),
-            ):
-                store.add_hypothesis(generated)
+                base_target=store.base_target,
+            )
+            if generated:
+                store.add_hypotheses(generated)
 
     store.queue.complete(hypothesis.id)
     store.save_or_log()

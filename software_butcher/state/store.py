@@ -161,6 +161,14 @@ class FindingStore:
         with self._lock:
             self.queue.add(hypothesis, self._base_target)
 
+    def add_hypotheses(self, hypotheses: list[Hypothesis]) -> None:
+        """Add generated follow-ups and drop any that fall outside inferred app scope."""
+        with self._lock:
+            for hypothesis in hypotheses:
+                self.queue.add(hypothesis, self._base_target)
+            self._sync_queue_config()
+            self.queue.prune_out_of_app_scope()
+
     def recon_complete_for(self, path_or_url: str) -> bool:
         with self._lock:
             return self.recon_checklist.is_complete(host_key(path_or_url))

@@ -345,3 +345,124 @@ def test_hypothesis_scope_blocks_infra_while_analysis_incomplete():
         base_target="http://example.edu/hall/",
         engagement_type="assessment",
     )
+
+
+def test_queue_next_prefers_hall_over_phpinfo_when_analysis_incomplete():
+    """Regression: stale infra in queue must not win when /hall app work remains."""
+    finding = _surface_finding(
+        content_pages=[
+            {
+                "url": "http://example.edu/hall/report.php",
+                "form_count": 0,
+                "conclusions": ["Report listing"],
+            },
+            {
+                "url": "http://example.edu/dashboard/phpinfo.php",
+                "page_type": "phpinfo",
+            },
+        ],
+        app_expand={"expanded_urls": ["http://example.edu/hall/admin.php"]},
+    )
+    queue = HypothesisQueue()
+    base = "http://example.edu/hall/"
+    findings = {finding.id: finding}
+    queue.configure(findings=findings, engagement_type="assessment", base_target=base)
+
+    queue.add(
+        Hypothesis(
+            path="http://example.edu/hall/report.php",
+            reason="posture audit",
+            source_finding_id=finding.id,
+            priority=0.7,
+            metadata={"generated_by": "security_posture", "intent": "security_posture_audit"},
+        ),
+        base_target=base,
+    )
+    queue.add(
+        Hypothesis(
+            path="http://example.edu/hall/admin.php",
+            reason="organic expansion",
+            source_finding_id=finding.id,
+            priority=0.75,
+            metadata={"generated_by": "app_link_expand", "intent": "http_surface_map"},
+        ),
+        base_target=base,
+    )
+
+    stale_infra = Hypothesis(
+        path="http://example.edu/dashboard/phpinfo.php",
+        reason="stack intel",
+        source_finding_id=finding.id,
+        priority=0.99,
+        metadata={"generated_by": "content_intel", "intent": "http_surface_map"},
+    )
+    queue._items[queue._key(stale_infra.path, stale_infra.reason)] = stale_infra
+
+    first = queue.next()
+    assert first is not None
+    assert "/hall/" in first.path
+    assert "phpinfo" not in first.path
+
+
+def test_queue_next_returns_none_when_only_infra_pending_and_analysis_incomplete():
+    finding = _surface_finding(
+        content_pages=[
+            {
+                "url": "http://example.edu/hall/report.php",
+                "form_count": 0,
+                "conclusions": ["Report listing"],
+            },
+            {
+                "url": "http://example.edu/dashboard/phpinfo.php",
+                "page_type": "phpinfo",
+            },
+        ],
+        app_expand={"expanded_urls": []},
+    )
+    queue = HypothesisQueue()
+    base = "http://example.edu/hall/"
+    findings = {finding.id: finding}
+    queue.configure(findings=findings, engagement_type="assessment", base_target=base)
+
+    stale_infra = Hypothesis(
+        path="http://example.edu/dashboard/phpinfo.php",
+        reason="stack intel",
+        source_finding_id=finding.id,
+        priority=0.99,
+        metadata={"generated_by": "content_intel", "intent": "http_surface_map"},
+    )
+    queue._items[queue._key(stale_infra.path, stale_infra.reason)] = stale_infra
+
+    assert queue.next() is None
+
+
+def test_generator_defers_infra_when_hall_app_incomplete():
+    from software_butcher.brain.hypotheses import HypothesisGenerator
+
+    finding = _surface_finding(
+        path="http://example.edu/hall",
+        content_analysis=True,
+        stack_landing={"detected": True, "stack": "xampp_default"},
+        content_pages=[
+            {
+                "url": "http://example.edu/hall/report.php",
+                "form_count": 0,
+                "conclusions": ["Report listing"],
+            },
+            {
+                "url": "http://example.edu/dashboard/phpinfo.php",
+                "page_type": "phpinfo",
+                "conclusions": ["PHP configuration disclosure"],
+            },
+        ],
+        app_expand={"expanded_urls": ["http://example.edu/hall/admin.php"]},
+    )
+    hyps = HypothesisGenerator().generate(
+        finding,
+        engagement_type="assessment",
+        base_target="http://example.edu/hall/",
+    )
+    paths = {h.path for h in hyps}
+    assert "http://example.edu/hall/admin.php" in paths
+    assert any("/hall/" in p for p in paths)
+    assert not any("phpinfo" in p for p in paths)
