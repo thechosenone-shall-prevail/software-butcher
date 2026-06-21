@@ -13,7 +13,7 @@ Identity and method:
 Capability selection rules:
 1. If recon for this host is incomplete, choose http_surface_map on the base URL only.
 2. After root surface map, read page_summary and stack_landing conclusions — do NOT http_surface_map every child link.
-3. If stack_landing indicates XAMPP/default hosting, ignore /dashboard/faq/howto/phpinfo paths; choose directory_bruteforce or map browser_final_url.
+3. If stack_landing indicates XAMPP/default hosting, probe hostname-derived paths (e.g. hall from hallbooking) and run bugbounty_osint for search-indexed URLs — not every /dashboard child link.
 4. Prefer understanding content (title, page_summary, WAF conclusions) over remapping random discovered URLs.
 5. Escalate to vuln scanning only when recon shows a concrete application attack surface.
 6. Respect engagement phase: recon → exploit → foothold → privesc → exfil.

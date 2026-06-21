@@ -6,6 +6,7 @@ import re
 import urllib.parse
 from typing import Any
 
+from software_butcher.core.domain_semantics import semantic_path_candidates
 from software_butcher.core.path_relevance import (
     detect_default_stack_landing,
     score_path,
@@ -244,6 +245,33 @@ def map_http_surface(
         final_url=curl_final,
     )
 
+    semantic_probes: list[dict[str, Any]] = []
+    meta = (scope or {}).get("metadata") if isinstance((scope or {}).get("metadata"), dict) else {}
+    engagement_context = str(meta.get("engagement_context") or "")
+
+    if stack_landing.get("detected"):
+        for cand in semantic_path_candidates(base, engagement_context=engagement_context):
+            probe_url = str(cand["url"])
+            if probe_url.rstrip("/").lower() in seen:
+                continue
+            probe = transport.follow_redirects(probe_url, "GET", profile="browser", host=host)
+            semantic_probes.append(
+                {
+                    "url": probe_url,
+                    "token": cand["token"],
+                    "status_code": probe.status_code,
+                    "title": extract_title(probe.body),
+                    "score": cand["score"],
+                    "rationale": cand["rationale"],
+                    "reachable": probe.status_code is not None and probe.status_code < 400,
+                }
+            )
+            if probe.status_code is not None and probe.status_code < 400:
+                normalized = probe_url.rstrip("/")
+                if normalized not in seen:
+                    seen.add(normalized)
+                    discovered.append(normalized)
+
     scored_urls: list[dict[str, Any]] = []
     prioritized: list[str] = []
     for link in discovered:
@@ -271,6 +299,7 @@ def map_http_surface(
         "title": title,
         "page_summary": page_summary,
         "stack_landing": stack_landing,
+        "semantic_probes": semantic_probes,
         "discovered_urls": prioritized,
         "all_discovered_urls": discovered,
         "scored_urls": scored_urls,
@@ -392,6 +421,14 @@ class HttpSurfaceAdapter:
         if stack_landing.get("detected"):
             evidence.append(f"stack_landing={stack_landing.get('stack')}")
             evidence.append(f"conclusion={stack_landing.get('conclusion')}")
+        for probe in surface.get("semantic_probes") or []:
+            if probe.get("reachable"):
+                evidence.append(
+                    f"semantic_probe: {probe.get('url')} status={probe.get('status_code')} "
+                    f"title={probe.get('title')} token={probe.get('token')}"
+                )
+            else:
+                evidence.append(f"semantic_probe_miss: {probe.get('url')} status={probe.get('status_code')}")
         if surface.get("page_summary"):
             evidence.append(f"page_summary={surface['page_summary'][:200]}")
 
@@ -412,6 +449,7 @@ class HttpSurfaceAdapter:
             "transport": surface.get("transport"),
             "page_summary": surface.get("page_summary"),
             "stack_landing": stack_landing,
+            "semantic_probes": surface.get("semantic_probes"),
             "scored_urls": surface.get("scored_urls"),
             "all_discovered_urls": surface.get("all_discovered_urls"),
         }

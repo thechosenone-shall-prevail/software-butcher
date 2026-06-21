@@ -202,12 +202,47 @@ class HypothesisGenerator:
         stack_landing = (finding.metadata or {}).get("stack_landing") or {}
         if capability == "http_surface_map" and stack_landing.get("detected"):
             base = base_web_url(finding.path)
+            ctx = str((finding.metadata or {}).get("engagement_context") or "")
+            for cand in semantic_path_candidates(base, engagement_context=ctx):
+                url = str(cand["url"])
+                if score_path(url) < 0.5:
+                    continue
+                generated.append(
+                    Hypothesis(
+                        path=url,
+                        reason=cand["rationale"],
+                        source_finding_id=finding.id,
+                        priority=float(cand["score"]),
+                        metadata={
+                            "intent": "http_surface_map",
+                            "asset_type": "web_endpoint",
+                            "generated_by": "domain_semantics",
+                            "semantic_token": cand["token"],
+                        },
+                    )
+                )
+            generated.append(
+                Hypothesis(
+                    path=base,
+                    reason=(
+                        "Search-indexed paths may exist off-root (e.g. Google site: results). "
+                        "Run OSINT workflow to discover indexed URLs not linked from homepage."
+                    ),
+                    source_finding_id=finding.id,
+                    priority=0.96,
+                    metadata={
+                        "intent": "bugbounty_osint",
+                        "asset_type": "web_endpoint",
+                        "generated_by": "search_index_osint",
+                    },
+                )
+            )
             generated.append(
                 Hypothesis(
                     path=base,
                     reason=stack_landing.get("conclusion") or "Default stack landing detected; discover unlinked application paths.",
                     source_finding_id=finding.id,
-                    priority=0.97,
+                    priority=0.94,
                     metadata={
                         "intent": "directory_bruteforce",
                         "asset_type": "web_endpoint",

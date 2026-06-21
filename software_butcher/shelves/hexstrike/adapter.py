@@ -156,6 +156,11 @@ class HexstrikeAdapter:
             asset_types=("domain", "web_endpoint"),
         ),
         AdapterCapability(
+            name="bugbounty_osint",
+            description="OSINT workflow — search-indexed URLs, site: discovery, public footprint",
+            asset_types=("domain", "web_endpoint"),
+        ),
+        AdapterCapability(
             name="bugbounty_comprehensive",
             description="Full automated bug bounty comprehensive assessment",
             asset_types=("domain", "web_endpoint", "api"),
@@ -343,6 +348,7 @@ class HexstrikeAdapter:
             "technology_fingerprint": lambda: self.client.detect_technologies(target, **safe_opts),
             # Bug bounty workflows
             "bugbounty_recon": lambda: self.client.bugbounty_recon(target, **safe_opts),
+            "bugbounty_osint": lambda: self.client.bugbounty_osint(target, **safe_opts),
             "bugbounty_comprehensive": lambda: self.client.bugbounty_comprehensive(target, **safe_opts),
             "cve_lookup": lambda: self._run_cve_lookup(target, safe_opts),
             # Shell session management
@@ -450,6 +456,7 @@ class HexstrikeAdapter:
             "ai_attack_chain": "ai_attack_chain",
             "technology_fingerprint": "technology_fingerprint",
             "bugbounty_recon": "bugbounty_recon",
+            "bugbounty_osint": "bugbounty_osint",
             "bugbounty_comprehensive": "bugbounty_comprehensive",
             "cve_lookup": "cve_lookup",
             "shell_command_execution": "shell_command_execution",

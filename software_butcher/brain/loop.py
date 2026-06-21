@@ -68,6 +68,7 @@ _INTENT_ADAPTER_MAP: dict[str, str] = {
     "ai_attack_chain": "hexstrike",
     "technology_fingerprint": "hexstrike",
     "bugbounty_recon": "hexstrike",
+    "bugbounty_osint": "hexstrike",
     "bugbounty_comprehensive": "hexstrike",
     "payload_evasion": "boaz",
     "oss_fuzzing": "boaz",
