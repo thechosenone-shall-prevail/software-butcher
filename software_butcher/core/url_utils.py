@@ -18,6 +18,23 @@ def host_key(url: str) -> str:
     return url.strip().lower()
 
 
+def engagement_entry_url(url: str) -> str:
+    """Return the scoped assessment entry URL.
+
+    When ``--target`` includes a path (e.g. ``/hall/``), recon and gates use that
+    path — not the bare hostname root.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return raw
+    parsed = urlsplit(raw)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        if (parsed.path or "").strip("/"):
+            return raw.rstrip("/")
+        return f"{parsed.scheme}://{parsed.netloc}"
+    return base_web_url(raw).rstrip("/")
+
+
 def base_web_url(url: str) -> str:
     """Return scheme://host for a URL or bare domain."""
     parsed = urlsplit(url.strip())

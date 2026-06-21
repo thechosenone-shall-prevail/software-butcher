@@ -63,8 +63,9 @@ def build_brain_context(
                 extra += f" [PHP {meta['php_version']}]"
         if meta.get("stack_landing", {}).get("detected"):
             extra += " [XAMPP/default stack landing]"
-        if meta.get("infrastructure", {}).get("conclusions"):
-            extra += f" | {meta['infrastructure']['conclusions'][0][:80]}"
+        infra = meta.get("infrastructure")
+        if isinstance(infra, dict) and infra.get("conclusions"):
+            extra += f" | {infra['conclusions'][0][:80]}"
         lines.append(
             f"  - [{finding.status}] {finding.path} | theme={finding.cluster_theme} "
             f"conf={finding.confidence:.2f} emergent={finding.emergent_confidence:.2f} "

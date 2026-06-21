@@ -34,6 +34,14 @@ ASSESSMENT_DEPRIORITIZED: frozenset[str] = frozenset({
     "bugbounty_osint",
     "bugbounty_comprehensive",
     "technology_fingerprint",
+    "xss_scanning",
+    "api_fuzzing",
+    "api_enumeration",
+    "cms_scanning",
+    "continue_discovery",
+    "discover",
+    "enrich",
+    "fingerprint",
 })
 
 ASSESSMENT_GENERIC_SCANNERS: frozenset[str] = frozenset({
@@ -44,6 +52,11 @@ ASSESSMENT_GENERIC_SCANNERS: frozenset[str] = frozenset({
     "bugbounty_recon",
     "bugbounty_osint",
     "bugbounty_comprehensive",
+    "xss_scanning",
+    "api_fuzzing",
+    "api_enumeration",
+    "cms_scanning",
+    "continue_discovery",
 })
 
 

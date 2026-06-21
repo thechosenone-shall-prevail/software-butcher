@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
-from software_butcher.core.url_utils import base_web_url, host_key
+from software_butcher.core.url_utils import base_web_url, engagement_entry_url, host_key
 from software_butcher.state.schema import Finding
 
 REQUIRED_RECON_CAPABILITIES: tuple[str, ...] = ("http_surface_map",)
@@ -94,15 +94,10 @@ def record_recon_progress(
 
     host = host_key(finding.path)
     if capability in HOST_LEVEL_RECON_CAPABILITIES:
-        root = base_web_url(base_target or finding.path).rstrip("/")
-        mapped_target = str((finding.metadata or {}).get("mapped_target", "")).rstrip("/")
-        finding_path = finding.path.rstrip("/")
-        is_root_mapping = (
-            finding_path.lower() == root.lower()
-            or is_root_surface_url(finding.path)
-            or mapped_target.lower() == root.lower()
-        )
-        if not is_root_mapping:
+        entry = engagement_entry_url(base_target or finding.path).rstrip("/").lower()
+        finding_path = finding.path.rstrip("/").lower()
+        mapped_target = str((finding.metadata or {}).get("mapped_target", "")).rstrip("/").lower()
+        if finding_path != entry and mapped_target != entry:
             return
 
     if capability in REQUIRED_RECON_CAPABILITIES or capability == "directory_bruteforce":

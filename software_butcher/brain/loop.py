@@ -20,7 +20,7 @@ from software_butcher.core.router import AssetRouter, RouteDecision
 from software_butcher.core.runner import SafeRunner
 from software_butcher.core.recon_seed import ensure_host_recon_hypothesis, next_recon_hypothesis
 from software_butcher.core.scope import Scope
-from software_butcher.core.url_utils import base_web_url, host_key
+from software_butcher.core.url_utils import base_web_url, engagement_entry_url, host_key
 from software_butcher.core.capability_priority import (
     ASSESSMENT_DEPRIORITIZED,
     ASSESSMENT_GENERIC_SCANNERS,
@@ -432,7 +432,7 @@ def _apply_recon_gate(
         return decision
 
     chosen = str((decision.options or {}).get("capability") or decision.intent or explicit_intent or "")
-    recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
+    recon_base = engagement_entry_url(store.base_target or hypothesis.path).rstrip("/")
 
     if missing in HOST_LEVEL_RECON_CAPABILITIES:
         if hypothesis.path.rstrip("/").lower() != recon_base.lower():
@@ -610,7 +610,7 @@ def _apply_local_analysis_gate(
     meta = hypothesis.metadata or {}
 
     if engagement_type == "assessment" and not _host_has_content_intel(store, host_key(hypothesis.path)):
-        recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
+        recon_base = engagement_entry_url(store.base_target or hypothesis.path).rstrip("/")
         return PolicyDecision(
             intent="http_surface_map",
             asset=decision.asset,
@@ -659,7 +659,7 @@ def _apply_scanner_gate(
         return decision
 
     host = host_key(hypothesis.path)
-    recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
+    recon_base = engagement_entry_url(store.base_target or hypothesis.path).rstrip("/")
     target_url = hypothesis.path.rstrip("/")
     is_host_root = _normalize_url(target_url) == _normalize_url(recon_base)
 
@@ -815,13 +815,41 @@ def _apply_assessment_priority_gate(
     if not is_assessment_deprioritized(capability):
         return decision
 
-    # sql_injection_probing: scanner gate validates evidence; allow through if it passed.
+    host = host_key(hypothesis.path)
+    target_url = hypothesis.path.rstrip("/")
+
     if capability == "sql_injection_probing":
         return decision
 
-    host = host_key(hypothesis.path)
-    recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
-    target_url = hypothesis.path.rstrip("/")
+    # Never run HexStrike spray tools in assessment — advance local web_audit instead.
+    if capability in {
+        "xss_scanning",
+        "api_fuzzing",
+        "api_enumeration",
+        "cms_scanning",
+        "continue_discovery",
+        "discover",
+        "enrich",
+        "fingerprint",
+    }:
+        next_cap = _next_analysis_capability(store, host, target_url) or "security_posture_audit"
+        sys.stderr.write(
+            f"[Brain] Assessment priority gate: blocked {capability} — using local {next_cap}\n"
+        )
+        return PolicyDecision(
+            intent=next_cap,
+            asset=Asset(
+                locator=target_url,
+                asset_type=decision.asset.asset_type,
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="web_audit",
+            reason=f"Assessment mode blocks HexStrike {capability}; local analysis ({next_cap}) instead.",
+            options={"capability": next_cap},
+        )
+
+    recon_base = engagement_entry_url(store.base_target or hypothesis.path).rstrip("/")
 
     if capability in ASSESSMENT_GENERIC_SCANNERS and not _host_stack_cve_checked(store, host):
         sys.stderr.write(

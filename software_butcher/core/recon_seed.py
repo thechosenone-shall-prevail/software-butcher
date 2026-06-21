@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from software_butcher.core.url_utils import base_web_url, host_key
+from software_butcher.core.url_utils import engagement_entry_url, host_key
 from software_butcher.state.recon_checklist import REQUIRED_RECON_CAPABILITIES
 from software_butcher.state.schema import Hypothesis
 from software_butcher.state.store import FindingStore
@@ -21,7 +21,7 @@ def next_recon_hypothesis(store: FindingStore) -> Hypothesis | None:
     if store.recon_checklist.is_complete(host):
         return None
 
-    base = base_web_url(store.base_target).rstrip("/").lower()
+    base = engagement_entry_url(store.base_target).rstrip("/").lower()
     for item in store.queue.pending_list():
         intent = str((item.metadata or {}).get("intent", "")).lower()
         if intent == "http_surface_map" and item.path.rstrip("/").lower() == base:
@@ -40,7 +40,7 @@ def ensure_host_recon_hypothesis(store: FindingStore) -> bool:
     if next_recon_hypothesis(store) is not None:
         return True
 
-    base = base_web_url(store.base_target).rstrip("/")
+    base = engagement_entry_url(store.base_target).rstrip("/")
     store.add_hypothesis(
         Hypothesis(
             path=base,
