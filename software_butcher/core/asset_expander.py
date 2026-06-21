@@ -27,8 +27,8 @@ GITHUB_REPO_PATTERN = re.compile(
 DEFAULT_INTENT_BY_ASSET_TYPE: dict[str, str] = {
     "binary": "reverse_engineer",
     "source_repo": "source_static_analysis",
-    "domain": "endpoint_discovery",
-    "web_endpoint": "endpoint_discovery",
+    "domain": "http_surface_map",
+    "web_endpoint": "http_surface_map",
     "api": "api_enumeration",
     "ip": "port_scanning",
     "cloud_account": "cloud_security_audit",
@@ -90,6 +90,8 @@ def extract_locators(finding: Finding) -> list[str]:
 
     metadata = finding.metadata or {}
     for endpoint in metadata.get("endpoints", []):
+        add(str(endpoint))
+    for endpoint in metadata.get("discovered_urls", []):
         add(str(endpoint))
     for subdomain in metadata.get("subdomains", []):
         host = str(subdomain).strip()

@@ -152,17 +152,12 @@ Rules for 'reproduction_steps' and 'fixes':
             )
 
         if store.base_target:
-            remaining = [
-                cap
-                for cap in ("web_behavior_analysis", "technology_fingerprint", "endpoint_discovery")
-                if cap not in store.recon_checklist.done(host_key(store.base_target))
-            ]
-            if remaining:
+            if not store.recon_checklist.is_complete(host_key(store.base_target)):
                 return Verdict(
                     name="partially_hardened",
                     summary=(
-                        f"Assessment incomplete — host recon not finished "
-                        f"(missing: {', '.join(remaining)}). No secure verdict yet."
+                        "Assessment incomplete — HTTP surface map not finished for the target host. "
+                        "No secure verdict yet."
                     ),
                     cited_findings=[finding.id for finding in findings[:5]],
                 )

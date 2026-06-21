@@ -33,6 +33,7 @@ BRAIN_SYSTEM_PROMPT = BRAIN_CAPABILITY_PROMPT
 _INTENT_ADAPTER_MAP: dict[str, str] = {
     # Discovery
     "web_behavior_analysis": "playwright_curl",
+    "http_surface_map": "http_surface",
     "fingerprint": "hexstrike",
     "discover": "hexstrike",
     "continue_discovery": "hexstrike",

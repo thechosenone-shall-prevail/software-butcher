@@ -98,12 +98,14 @@ def default_registry() -> AdapterRegistry:
     from software_butcher.shelves.frameworks.caldera.adapter import CalderaAdapter
     from software_butcher.shelves.frameworks.stratus_red_team.adapter import StratusRedTeamAdapter
     from software_butcher.shelves.hexstrike.adapter import HexstrikeAdapter
+    from software_butcher.shelves.web.http_surface import HttpSurfaceAdapter
     from software_butcher.shelves.web.playwright_curl import PlaywrightCurlAdapter
 
     registry.register(BinaryTriageAdapter())
     registry.register(OssFuzzAdapter())
     registry.register(CodeAnalysisAdapter())
     registry.register(HexstrikeAdapter())
+    registry.register(HttpSurfaceAdapter())
     registry.register(PlaywrightCurlAdapter())
     registry.register(AtomicRedTeamAdapter())
     registry.register(CalderaAdapter())

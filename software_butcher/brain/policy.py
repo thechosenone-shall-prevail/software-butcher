@@ -205,11 +205,11 @@ class BrainPolicy:
                 )
             if asset.asset_type in {"web_endpoint", "api", "domain"}:
                 return PolicyDecision(
-                    intent="web_behavior_analysis",
+                    intent="http_surface_map",
                     asset=asset,
-                    preferred_adapter="playwright_curl",
-                    reason="No evidence yet; start with HTTP behavior and header analysis.",
-                    options={"capability": "web_behavior_analysis"},
+                    preferred_adapter="http_surface",
+                    reason="No evidence yet; map HTTP surface locally before any remote scanners.",
+                    options={"capability": "http_surface_map"},
                 )
             return PolicyDecision(
                 intent="discover",

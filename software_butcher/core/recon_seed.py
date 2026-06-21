@@ -1,4 +1,4 @@
-"""Ensure host-level recon steps stay queued until the checklist completes."""
+"""Ensure host-level HTTP surface map stays queued until recon completes."""
 
 from __future__ import annotations
 
@@ -7,60 +7,49 @@ from software_butcher.state.recon_checklist import REQUIRED_RECON_CAPABILITIES
 from software_butcher.state.schema import Hypothesis
 from software_butcher.state.store import FindingStore
 
-RECON_REASONS: dict[str, str] = {
-    "web_behavior_analysis": "Observe HTTP behavior, redirects, headers, and cookies on the base URL.",
-    "technology_fingerprint": "Fingerprint web server, CMS, and application stack on the base URL.",
-    "endpoint_discovery": "Map reachable paths on the base URL with crawler-assisted discovery.",
-}
+SURFACE_MAP_REASON = (
+    "Map HTTP surface on the base URL: HEAD/GET, response headers, technology stack, "
+    "redirect chain, and same-origin links from HTML."
+)
 
 
 def next_recon_hypothesis(store: FindingStore) -> Hypothesis | None:
-    """Return the pending hypothesis matching the next missing host-level recon step."""
     if not store.base_target:
         return None
 
     host = host_key(store.base_target)
-    missing = store.recon_checklist.next_missing(host)
-    if not missing:
+    if store.recon_checklist.is_complete(host):
         return None
 
     base = base_web_url(store.base_target).rstrip("/").lower()
     for item in store.queue.pending_list():
         intent = str((item.metadata or {}).get("intent", "")).lower()
-        if intent == missing and item.path.rstrip("/").lower() == base:
+        if intent == "http_surface_map" and item.path.rstrip("/").lower() == base:
             return item
     return None
 
 
 def ensure_host_recon_hypothesis(store: FindingStore) -> bool:
-    """Queue the next missing host-level recon step if it is not already pending."""
     if not store.base_target:
         return False
 
     host = host_key(store.base_target)
-    missing = store.recon_checklist.next_missing(host)
-    if not missing:
+    if store.recon_checklist.is_complete(host):
         return False
 
     if next_recon_hypothesis(store) is not None:
         return True
 
     base = base_web_url(store.base_target).rstrip("/")
-    priority = {
-        "web_behavior_analysis": 1.0,
-        "technology_fingerprint": 0.97,
-        "endpoint_discovery": 0.94,
-    }.get(missing, 0.9)
-
     store.add_hypothesis(
         Hypothesis(
             path=base,
-            reason=RECON_REASONS.get(missing, f"Complete host recon: {missing}"),
+            reason=SURFACE_MAP_REASON,
             source_finding_id="recon:checklist",
-            priority=priority,
+            priority=1.0,
             metadata={
                 "asset_type": "web_endpoint",
-                "intent": missing,
+                "intent": "http_surface_map",
                 "generated_by": "recon_checklist",
             },
         )

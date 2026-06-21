@@ -39,11 +39,12 @@ def test_parent_path_hypothesis_skips_junk_paths(tmp_path):
     assert "http://hallbooking.srmrmp.edu.in" in parents
 
 
-def test_domain_seed_only_three_root_hypotheses():
+def test_domain_seed_single_root_surface_hypothesis():
     asset = Asset(locator="http://hallbooking.srmrmp.edu.in", asset_type="web_endpoint")
     hyps = build_domain_seed_hypotheses(asset)
-    assert len(hyps) == 3
-    assert all(h.path.rstrip("/") == "http://hallbooking.srmrmp.edu.in" for h in hyps)
+    assert len(hyps) == 1
+    assert hyps[0].metadata["intent"] == "http_surface_map"
+    assert hyps[0].path.rstrip("/") == "http://hallbooking.srmrmp.edu.in"
     assert not any(h.metadata.get("generated_by") == "app_context_paths" for h in hyps)
 
 
@@ -64,7 +65,8 @@ def test_recon_gate_redirects_host_steps_to_base(tmp_path):
         options={"capability": "endpoint_discovery"},
     )
     gated = _apply_recon_gate(store, hypothesis, decision, "endpoint_discovery")
-    assert gated.intent == "web_behavior_analysis"
+    assert gated.intent == "http_surface_map"
+    assert gated.preferred_adapter == "http_surface"
     assert hypothesis.path.rstrip("/") == "http://hallbooking.srmrmp.edu.in"
 
 
@@ -84,16 +86,15 @@ def test_recon_gate_blocks_nuclei_until_checklist_complete(tmp_path):
         options={"capability": "vulnerability_scanning"},
     )
     gated = _apply_recon_gate(store, hypothesis, decision, None)
-    assert gated.intent == "web_behavior_analysis"
-    assert gated.options["capability"] == "web_behavior_analysis"
+    assert gated.intent == "http_surface_map"
+    assert gated.options["capability"] == "http_surface_map"
 
 
 def test_recon_gate_allows_nuclei_after_checklist(tmp_path):
     store = FindingStore(tmp_path / "state.json")
     host = "hallbooking.srmrmp.edu.in"
     checklist = store.recon_checklist
-    for cap in ("web_behavior_analysis", "technology_fingerprint", "endpoint_discovery"):
-        checklist.mark(host, cap)
+    checklist.mark(host, "http_surface_map")
 
     hypothesis = Hypothesis(
         path="http://hallbooking.srmrmp.edu.in/dashboard",
@@ -111,11 +112,12 @@ def test_recon_gate_allows_nuclei_after_checklist(tmp_path):
     assert gated.intent == "vulnerability_scanning"
 
 
-def test_policy_starts_web_targets_with_behavior_analysis():
+def test_policy_starts_web_targets_with_surface_map():
     policy = BrainPolicy()
     asset = Asset(locator="http://hallbooking.srmrmp.edu.in", asset_type="web_endpoint")
     decision = policy.decide(asset, [])
-    assert decision.intent == "web_behavior_analysis"
+    assert decision.intent == "http_surface_map"
+    assert decision.preferred_adapter == "http_surface"
 
 
 def test_record_recon_progress_only_on_root_surface():
@@ -126,8 +128,8 @@ def test_record_recon_progress_only_on_root_surface():
         Finding(
             path="http://hallbooking.srmrmp.edu.in/hall",
             hypothesis="child path",
-            provenance="playwright_curl:baseline",
-            metadata={"capability": "web_behavior_analysis"},
+            provenance="http_surface:link",
+            metadata={"capability": "http_surface_map"},
         ),
         base_target=base,
     )
@@ -138,12 +140,12 @@ def test_record_recon_progress_only_on_root_surface():
         Finding(
             path="http://hallbooking.srmrmp.edu.in/",
             hypothesis="root",
-            provenance="playwright_curl:baseline",
-            metadata={"capability": "web_behavior_analysis"},
+            provenance="http_surface:map",
+            metadata={"capability": "http_surface_map"},
         ),
         base_target=base,
     )
-    assert "web_behavior_analysis" in checklist.done("hallbooking.srmrmp.edu.in")
+    assert "http_surface_map" in checklist.done("hallbooking.srmrmp.edu.in")
 
 
 def test_findings_from_adapter_result_stamps_capability():
@@ -151,14 +153,14 @@ def test_findings_from_adapter_result_stamps_capability():
     from software_butcher.core.adapter import AdapterResult
 
     result = AdapterResult(
-        adapter="playwright_curl",
+        adapter="http_surface",
         success=True,
         summary="ok",
         findings=[
             {
-                "hypothesis": "baseline probe",
+                "hypothesis": "surface map",
                 "path": "http://hallbooking.srmrmp.edu.in/",
-                "provenance": "playwright_curl:baseline",
+                "provenance": "http_surface:map",
                 "metadata": {"status_code": 200},
             }
         ],
@@ -168,16 +170,16 @@ def test_findings_from_adapter_result_stamps_capability():
         hypothesis=Hypothesis(path="http://hallbooking.srmrmp.edu.in/", reason="x", source_finding_id="y"),
         parent_path_value=None,
         default_asset_type="web_endpoint",
-        capability="web_behavior_analysis",
+        capability="http_surface_map",
     )
-    assert findings[0].metadata.get("capability") == "web_behavior_analysis"
+    assert findings[0].metadata.get("capability") == "http_surface_map"
 
 
 def test_queue_dedupes_same_path_and_intent():
     queue = HypothesisQueue()
     target = "http://hallbooking.srmrmp.edu.in"
-    meta = {"intent": "web_behavior_analysis", "asset_type": "web_endpoint"}
+    meta = {"intent": "http_surface_map", "asset_type": "web_endpoint"}
     queue.add(Hypothesis(path=target, reason="first", source_finding_id="a", metadata=meta))
     queue.add(Hypothesis(path=target, reason="second duplicate", source_finding_id="b", metadata=meta))
-    pending = [h for h in queue.pending_list() if h.metadata.get("intent") == "web_behavior_analysis"]
+    pending = [h for h in queue.pending_list() if h.metadata.get("intent") == "http_surface_map"]
     assert len(pending) == 1

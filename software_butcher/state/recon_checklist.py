@@ -9,13 +9,9 @@ from urllib.parse import urlsplit
 from software_butcher.core.url_utils import base_web_url, host_key
 from software_butcher.state.schema import Finding
 
-REQUIRED_RECON_CAPABILITIES: tuple[str, ...] = (
-    "web_behavior_analysis",
-    "technology_fingerprint",
-    "endpoint_discovery",
-)
+REQUIRED_RECON_CAPABILITIES: tuple[str, ...] = ("http_surface_map",)
 
-HOST_LEVEL_RECON_CAPABILITIES = frozenset(REQUIRED_RECON_CAPABILITIES)
+HOST_LEVEL_RECON_CAPABILITIES = frozenset({*REQUIRED_RECON_CAPABILITIES, "directory_bruteforce"})
 
 EXPLOIT_SCAN_CAPABILITIES = frozenset(
     {
@@ -72,6 +68,8 @@ def capability_from_finding(finding: Finding) -> str:
         return capability
     if finding.provenance.startswith("playwright_curl"):
         return "web_behavior_analysis"
+    if finding.provenance.startswith("http_surface"):
+        return "http_surface_map"
     return ""
 
 
@@ -102,7 +100,7 @@ def record_recon_progress(
 
     if capability in REQUIRED_RECON_CAPABILITIES or capability == "directory_bruteforce":
         checklist.mark(host, capability)
-        if capability == "directory_bruteforce" and "endpoint_discovery" not in checklist.done(host):
+        if capability == "directory_bruteforce":
             checklist.mark(host, "endpoint_discovery")
 
 

@@ -39,6 +39,12 @@ class AssetRouter:
                     adapter="playwright_curl",
                     reason="Use browser and request-level analysis for web behavior validation.",
                 )
+            if intent in {"http_surface_map"}:
+                return RouteDecision(
+                    shelf="web",
+                    adapter="http_surface",
+                    reason="Local HEAD+GET surface map — headers, stack, redirects, organic links.",
+                )
             # Capability-specific routing — keeps traffic on hexstrike for
             # structured tool endpoints
             if intent in {"port_scanning", "vulnerability_scanning",

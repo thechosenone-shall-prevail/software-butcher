@@ -82,7 +82,7 @@ def test_tool_budget_stops_execution(tmp_path):
 def test_parallel_branches_run_multiple_adapters(tmp_path):
     store = FindingStore(tmp_path / "state.json")
     store.set_base_target("https://example.com")
-    for cap in ("web_behavior_analysis", "technology_fingerprint", "endpoint_discovery"):
+    for cap in ("http_surface_map",):
         store.recon_checklist.mark("example.com", cap)
     scope = Scope(name="t", allowed_domains=["example.com"], max_tool_calls=10)
 

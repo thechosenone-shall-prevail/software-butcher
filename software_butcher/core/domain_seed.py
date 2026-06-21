@@ -1,4 +1,4 @@
-"""OSINT-first hypothesis seeding for domain and web root targets."""
+"""Hypothesis seeding for domain and web root targets."""
 
 from __future__ import annotations
 
@@ -7,16 +7,9 @@ from urllib.parse import urlsplit
 from software_butcher.core.assets import Asset
 from software_butcher.state.schema import Hypothesis
 
-# Web assessment playbook — behavior and fingerprint before brute force / Nuclei.
-WEB_RECON_INTENTS: tuple[tuple[str, float, str], ...] = (
-    ("web_behavior_analysis", 1.0, "Observe HTTP behavior, redirects, headers, and cookies."),
-    ("technology_fingerprint", 0.97, "Fingerprint web server, CMS, and application stack."),
-    ("endpoint_discovery", 0.94, "Map paths with gobuster, ffuf, and crawler-assisted wordlists."),
-)
-
 
 def primary_web_url(asset: Asset) -> str:
-    """Return an https URL for domain or web assets."""
+    """Return scheme://host for domain or web assets."""
     locator = asset.locator.strip()
     if locator.startswith(("http://", "https://")):
         parsed = urlsplit(locator)
@@ -38,25 +31,20 @@ def build_domain_seed_hypotheses(
     asset: Asset,
     reason: str = "Initial target supplied by user",
 ) -> list[Hypothesis]:
-    """Build OSINT-first hypotheses for a domain or bare web root target."""
+    """Seed one local HTTP surface map on the base URL — no scanner checklist."""
     target = primary_web_url(asset) if is_domain_like(asset) else asset.locator.rstrip("/")
     asset_type = "web_endpoint" if asset.asset_type in {"domain", "web_endpoint"} else asset.asset_type
-    generated: list[Hypothesis] = []
-
-    for intent, priority, seed_reason in WEB_RECON_INTENTS:
-        generated.append(
-            Hypothesis(
-                path=target,
-                reason=f"{seed_reason} ({reason})",
-                source_finding_id="manual-seed",
-                priority=priority,
-                metadata={
-                    "asset_type": asset_type,
-                    "intent": intent,
-                    "generated_by": "domain_seed",
-                    "seed_domain": target,
-                },
-            )
+    return [
+        Hypothesis(
+            path=target,
+            reason=f"Map HTTP surface: headers, stack, redirects, and organic links ({reason})",
+            source_finding_id="manual-seed",
+            priority=1.0,
+            metadata={
+                "asset_type": asset_type,
+                "intent": "http_surface_map",
+                "generated_by": "domain_seed",
+                "seed_domain": target,
+            },
         )
-
-    return generated
+    ]

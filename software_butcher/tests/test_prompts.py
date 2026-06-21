@@ -6,7 +6,7 @@ from software_butcher.brain.prompts import ADVISOR_HYPOTHESIS_PROMPT, BRAIN_CAPA
 def test_brain_prompt_is_autonomous_not_ctf():
     lowered = BRAIN_CAPABILITY_PROMPT.lower()
     assert "autonomous" in lowered
-    assert "ctf" in lowered or "not a ctf" in lowered
+    assert "http_surface_map" in lowered
     assert "/admin" not in BRAIN_CAPABILITY_PROMPT
 
 
