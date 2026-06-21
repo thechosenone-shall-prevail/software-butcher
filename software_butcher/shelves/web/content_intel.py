@@ -44,15 +44,11 @@ def parse_php_version(headers: dict[str, str], body: str = "") -> str | None:
 
 
 def is_phpinfo_page(url: str, body: str) -> bool:
-    if "phpinfo" in url.lower():
-        return True
     sample = (body or "")[:8000].lower()
     return sum(1 for m in PHPINFO_MARKERS if m in sample) >= 2
 
 
 def is_phpmyadmin_page(url: str, body: str) -> bool:
-    if "phpmyadmin" in url.lower():
-        return True
     sample = (body or "")[:8000].lower()
     return any(m in sample for m in PHPMYADMIN_MARKERS)
 

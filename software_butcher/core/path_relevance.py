@@ -68,11 +68,6 @@ def score_path(url: str, *, title: str = "", page_context: str = "") -> float:
         if signal in path or signal in text:
             score = max(score, 0.92 if signal == "hall" else 0.85)
 
-    if "phpmyadmin" in path:
-        score = max(score, 0.93)
-    if "phpinfo" in path:
-        score = max(score, 0.95)
-
     if path.rstrip("/") == "/dashboard":
         return 0.15
 

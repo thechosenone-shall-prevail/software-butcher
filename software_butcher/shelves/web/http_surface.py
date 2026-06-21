@@ -36,7 +36,6 @@ TECHNOLOGY_HEADERS = (
 )
 TITLE_RE = re.compile(r"<title[^>]*>([^<]{1,200})</title>", re.IGNORECASE)
 WELL_KNOWN_PATHS = ("/robots.txt", "/sitemap.xml")
-ADMIN_PROBE_PATHS = ("/phpmyadmin", "/dashboard/phpinfo.php")
 ROBOTS_SITEMAP_RE = re.compile(r"^Sitemap:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
 ROBOTS_PATH_RE = re.compile(r"^(?:Allow|Disallow):\s*(/\S*)", re.IGNORECASE | re.MULTILINE)
 SITEMAP_LOC_RE = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.IGNORECASE)
@@ -274,37 +273,6 @@ def map_http_surface(
                     "rationale": cand["rationale"],
                     "reachable": probe.status_code is not None and probe.status_code < 400,
                     "content_analysis": content,
-                }
-            )
-            if probe.status_code is not None and probe.status_code < 400:
-                normalized = probe_url.rstrip("/")
-                if normalized not in seen:
-                    seen.add(normalized)
-                    discovered.append(normalized)
-
-        for admin_path in ADMIN_PROBE_PATHS:
-            probe_url = urllib.parse.urljoin(base.rstrip("/") + "/", admin_path.lstrip("/"))
-            if probe_url.rstrip("/").lower() in seen:
-                continue
-            probe = transport.follow_redirects(probe_url, "GET", profile="browser", host=host)
-            probe_title = extract_title(probe.body)
-            content = analyze_page_content(
-                probe_url,
-                headers=probe.headers,
-                body=probe.body,
-                title=probe_title,
-            )
-            semantic_probes.append(
-                {
-                    "url": probe_url,
-                    "token": admin_path.strip("/").replace("/", "_"),
-                    "status_code": probe.status_code,
-                    "title": probe_title,
-                    "score": score_path(probe_url),
-                    "rationale": f"Admin panel probe for {admin_path} on detected default stack.",
-                    "reachable": probe.status_code is not None and probe.status_code < 400,
-                    "content_analysis": content,
-                    "admin_probe": True,
                 }
             )
             if probe.status_code is not None and probe.status_code < 400:

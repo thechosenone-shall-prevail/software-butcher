@@ -35,6 +35,6 @@ def test_detect_xampp_landing():
     assert result["stack"] == "xampp_default"
 
 
-def test_phpmyadmin_and_phpinfo_score_high():
-    assert score_path("http://example.com/phpmyadmin/") >= 0.93
-    assert score_path("http://example.com/dashboard/phpinfo.php") >= 0.95
+def test_phpmyadmin_and_phpinfo_no_path_boost():
+    assert score_path("http://example.com/phpmyadmin/") < 0.93
+    assert score_path("http://example.com/dashboard/phpinfo.php") < 0.95
