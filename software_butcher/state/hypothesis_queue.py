@@ -11,6 +11,7 @@ from software_butcher.core.app_root import (
     filter_assessment_pending,
     hypothesis_in_application_scope,
     infer_application_root,
+    url_under_application_root,
 )
 from software_butcher.core.path_relevance import hypothesis_has_evidence_lineage
 from software_butcher.core.url_utils import canonical_web_url, is_plausible_target_path
@@ -135,11 +136,21 @@ class HypothesisQueue:
             return 0
 
         removed = 0
+        findings_list = list(findings.values())
+        incomplete = (
+            self._engagement_type == "assessment"
+            and app_root.confidence >= 0.55
+            and app_subtree_analysis_incomplete(findings_list, app_root)
+        )
 
         def _prune() -> None:
             nonlocal removed
             for key, item in list(self._items.items()):
                 if item.status != "pending":
+                    continue
+                if incomplete and not url_under_application_root(item.path, app_root):
+                    del self._items[key]
+                    removed += 1
                     continue
                 if hypothesis_in_application_scope(
                     item,

@@ -515,7 +515,12 @@ def app_scope_work_pending(
 
 
 def _page_content_mapped(page: dict) -> bool:
-    return bool(page.get("conclusions") or page.get("form_count") is not None or page.get("page_type"))
+    return bool(
+        page.get("conclusions")
+        or page.get("form_count") is not None
+        or page.get("page_type")
+        or page.get("content_analysis")
+    )
 
 
 def _page_redirect_leak_suspected(page: dict) -> bool:
@@ -565,11 +570,17 @@ def app_subtree_analysis_incomplete(
     if pending_maps or pending_redirects:
         return True
 
+    discovered = _discovered_app_urls(findings_list, app_root)
+    if not discovered:
+        return True
+
+    for url_norm in discovered:
+        if not _capability_observed_on_url(findings_list, url_norm, "security_posture_audit"):
+            return True
+
     for url, page in _iter_app_pages_with_data(findings_list, app_root):
         if not _page_content_mapped(page):
             continue
-        if not _capability_observed_on_url(findings_list, url, "security_posture_audit"):
-            return True
         if _page_redirect_leak_suspected(page) and not _capability_observed_on_url(
             findings_list, url, "redirect_body_audit"
         ):

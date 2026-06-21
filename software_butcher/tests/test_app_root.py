@@ -2,6 +2,7 @@
 
 from software_butcher.brain.context import build_brain_context
 from software_butcher.core.app_root import (
+    ApplicationRoot,
     app_subtree_analysis_incomplete,
     filter_assessment_pending,
     hypothesis_in_application_scope,
@@ -345,6 +346,44 @@ def test_hypothesis_scope_blocks_infra_while_analysis_incomplete():
         base_target="http://example.edu/hall/",
         engagement_type="assessment",
     )
+
+
+def test_app_subtree_incomplete_when_only_content_analysis_on_app_root():
+    finding = Finding(
+        hypothesis="surface map",
+        path="http://example.edu/hall",
+        provenance="http_surface:map",
+        metadata={
+            "capability": "http_surface_map",
+            "content_analysis": True,
+            "content_pages": [
+                {
+                    "url": "http://example.edu/dashboard/phpinfo.php",
+                    "page_type": "phpinfo",
+                    "conclusions": ["PHP configuration disclosure"],
+                },
+            ],
+        },
+    )
+    app_root = infer_application_root([finding], base_target="http://example.edu/hall/")
+    assert app_root is not None
+    assert app_subtree_analysis_incomplete([finding], app_root) is True
+
+
+def test_app_subtree_incomplete_when_no_discovered_app_pages():
+    finding = Finding(
+        hypothesis="guess",
+        path="http://example.edu/dashboard/phpinfo.php",
+        provenance="http_surface:content_intel",
+        metadata={"page_type": "phpinfo", "content_analysis": True},
+    )
+    app_root = ApplicationRoot(
+        url="http://example.edu/hall",
+        confidence=0.9,
+        rationale="test",
+        evidence_urls=("http://example.edu/hall",),
+    )
+    assert app_subtree_analysis_incomplete([finding], app_root) is True
 
 
 def test_queue_next_prefers_hall_over_phpinfo_when_analysis_incomplete():
