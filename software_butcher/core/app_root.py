@@ -514,33 +514,44 @@ def assessment_serializes_branches(
     *,
     engagement_type: str = "assessment",
 ) -> tuple[bool, str]:
-    """Single-branch PCS while app-subtree mapping or redirect audits remain."""
+    """Assessment runs single-branch once an application root is inferred."""
     if engagement_type != "assessment" or app_root is None or app_root.confidence < 0.55:
         return False, ""
     pending_maps, pending_redirects = app_scope_work_pending(findings, app_root)
-    if not pending_maps and not pending_redirects:
-        return False, ""
-    return (
-        True,
-        f"app_scope_serialize: {len(pending_maps)} unmapped app URL(s), "
-        f"{len(pending_redirects)} redirect audit(s) pending",
-    )
+    if pending_maps or pending_redirects:
+        return (
+            True,
+            f"app_scope_serialize: {len(pending_maps)} unmapped app URL(s), "
+            f"{len(pending_redirects)} redirect audit(s) pending",
+        )
+    return True, f"assessment_app_focus: app root {app_root.url} — single branch"
 
 
-def hypothesis_matches_app_focus(
-    hypothesis: Hypothesis,
+def filter_assessment_pending(
+    pending: list[Hypothesis],
     app_root: ApplicationRoot,
     findings: dict[str, Finding],
-) -> bool:
-    """When app work is pending, only pop hypotheses that advance the app subtree."""
-    if url_under_application_root(hypothesis.path, app_root):
-        return True
-    meta = hypothesis.metadata or {}
-    if str(meta.get("generated_by") or "") == "redirect_audit":
-        return url_under_application_root(hypothesis.path, app_root)
-    if str(meta.get("intent") or "") == "redirect_body_audit":
-        return url_under_application_root(hypothesis.path, app_root)
-    return False
+) -> list[Hypothesis]:
+    """Prefer app-subtree hypotheses; keep stack/dashboard/host-root out until app work is done."""
+    findings_list = list(findings.values())
+    app_hyps = [h for h in pending if url_under_application_root(h.path, app_root)]
+    pending_maps, pending_redirects = app_scope_work_pending(findings_list, app_root)
+    if pending_maps or pending_redirects:
+        return app_hyps
+
+    if app_hyps:
+        return app_hyps
+
+    infra = [
+        h
+        for h in pending
+        if is_infrastructure_url(h.path, findings_list)
+        and not is_stack_host_surface(h.path, findings_list)
+    ]
+    if infra:
+        return infra
+
+    return [h for h in pending if not is_stack_host_surface(h.path, findings_list)]
 
 
 def application_scope_priority_boost(

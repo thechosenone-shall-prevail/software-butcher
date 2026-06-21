@@ -106,6 +106,29 @@ def test_assessment_serializes_while_app_work_pending():
     assert app_root is not None
     serial, reason = assessment_serializes_branches(app_root, [finding], engagement_type="assessment")
     assert serial is True
-    assert "unmapped" in reason
+    assert "unmapped" in reason or "app root" in reason
     maps, redirects = app_scope_work_pending([finding], app_root)
     assert "http://example.edu/hall/admin.php" in maps
+
+
+def test_assessment_always_single_branch_when_app_root_known():
+    finding = Finding(
+        hypothesis="surface map",
+        path="http://example.edu/hall/index.php",
+        provenance="http_surface:map",
+        metadata={
+            "content_pages": [
+                {"url": "http://example.edu/hall/index.php", "form_count": 1, "conclusions": ["forms"]},
+            ],
+            "app_expand": {"expanded_urls": ["http://example.edu/hall/admin.php"]},
+        },
+    )
+    app_root = infer_application_root([finding], base_target="http://example.edu/hall/")
+    assert app_root is not None
+    # Simulate expand already mapped admin.php in content_pages
+    finding.metadata["content_pages"].append(
+        {"url": "http://example.edu/hall/admin.php", "form_count": 0, "conclusions": ["admin"]},
+    )
+    serial, reason = assessment_serializes_branches(app_root, [finding], engagement_type="assessment")
+    assert serial is True
+    assert "assessment_app_focus" in reason

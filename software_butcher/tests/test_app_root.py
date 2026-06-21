@@ -235,8 +235,8 @@ def test_pcs_skips_host_wide_branch_on_out_of_scope_finding():
         app_root=app_root,
         engagement_type="assessment",
     )
-    assert count > 1
-    assert "evidence_triggered" in reason
+    assert count == 1
+    assert "assessment_app_focus" in reason or "app_scope_serialize" in reason
 
 
 def test_url_under_application_root():

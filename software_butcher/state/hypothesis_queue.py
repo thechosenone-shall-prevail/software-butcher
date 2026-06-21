@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 from software_butcher.core.app_root import (
     application_scope_priority_boost,
     assessment_serializes_branches,
+    filter_assessment_pending,
     hypothesis_in_application_scope,
-    hypothesis_matches_app_focus,
     infer_application_root,
     app_scope_work_pending,
 )
@@ -165,15 +165,8 @@ class HypothesisQueue:
         app_root = infer_application_root(findings.values(), self._base_target)
         if self._engagement_type != "assessment" or app_root is None or app_root.confidence < 0.55:
             return pending
-        pending_maps, pending_redirects = app_scope_work_pending(findings.values(), app_root)
-        if not pending_maps and not pending_redirects:
-            return pending
-        focused = [
-            hyp
-            for hyp in pending
-            if hypothesis_matches_app_focus(hyp, app_root, findings)
-        ]
-        return focused if focused else pending
+        filtered = filter_assessment_pending(pending, app_root, findings)
+        return filtered if filtered else pending
 
     def _effective_priority(self, hypothesis: Hypothesis) -> float:
         findings = self._findings or {}
