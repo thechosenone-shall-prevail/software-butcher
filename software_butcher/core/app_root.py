@@ -233,12 +233,25 @@ def _content_mapped_urls(findings: Iterable[Finding], app_root: ApplicationRoot)
             elif page.get("content_analysis"):
                 mapped.add(_normalize(url))
         path = finding.path
-        if url_under_application_root(path, app_root) and meta.get("content_analysis"):
+        cap = str(meta.get("capability") or "")
+        if url_under_application_root(path, app_root) and (
+            meta.get("content_analysis") or cap == "http_surface_map"
+        ):
             mapped.add(_normalize(path))
         mapped_target = str(meta.get("mapped_target") or "")
-        if mapped_target and url_under_application_root(mapped_target, app_root) and meta.get("content_analysis"):
+        if mapped_target and url_under_application_root(mapped_target, app_root) and (
+            meta.get("content_analysis") or cap == "http_surface_map"
+        ):
             mapped.add(_normalize(mapped_target))
     return mapped
+
+
+def url_is_app_content_mapped(
+    url: str,
+    findings: Iterable[Finding],
+    app_root: ApplicationRoot,
+) -> bool:
+    return _normalize(url) in _content_mapped_urls(findings, app_root)
 
 
 def _application_work_urls(
@@ -703,7 +716,7 @@ def ensure_app_subtree_hypotheses(
 
     for url_norm in sorted(_application_work_urls(findings_list, app_root, base_target=base_target)):
         url = _resolve_work_url(url_norm, findings_list, app_root, base_target=base_target)
-        if url_norm not in mapped or url_norm in pending_map_norms:
+        if url_norm not in mapped:
             queued.append(
                 Hypothesis(
                     path=url,
@@ -726,7 +739,7 @@ def ensure_app_subtree_hypotheses(
                     path=url,
                     reason="Audit security headers, cookie flags, and CSRF tokens on this surface.",
                     source_finding_id=source_id,
-                    priority=0.82,
+                    priority=0.96,
                     metadata={
                         "intent": "security_posture_audit",
                         "asset_type": "web_endpoint",

@@ -165,9 +165,13 @@ def _url_has_content_map(store: FindingStore, host: str, target_url: str) -> boo
         return False
     for finding in _host_findings(store, host):
         meta = finding.metadata or {}
-        if _normalize_url(finding.path) == target and meta.get("content_analysis"):
+        if _normalize_url(finding.path) == target and (
+            meta.get("content_analysis") or str(meta.get("capability") or "") == "http_surface_map"
+        ):
             return True
-        if _normalize_url(str(meta.get("mapped_target") or "")) == target and meta.get("content_analysis"):
+        if _normalize_url(str(meta.get("mapped_target") or "")) == target and (
+            meta.get("content_analysis") or str(meta.get("capability") or "") == "http_surface_map"
+        ):
             return True
         for page in meta.get("content_pages") or []:
             if _normalize_url(str(page.get("url") or "")) == target:

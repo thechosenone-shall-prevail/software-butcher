@@ -11,6 +11,7 @@ from software_butcher.core.app_root import (
     filter_assessment_pending,
     hypothesis_in_application_scope,
     infer_application_root,
+    url_is_app_content_mapped,
     url_under_application_root,
 )
 from software_butcher.core.path_relevance import hypothesis_has_evidence_lineage
@@ -192,8 +193,28 @@ class HypothesisQueue:
                 return self._next_unlocked()
         return self._next_unlocked()
 
+    def _promote_pending_analysis(self, pending: list[Hypothesis]) -> None:
+        """Rewrite stale http_surface_map queue items to posture once content is mapped."""
+        findings = self._findings or {}
+        app_root = infer_application_root(findings.values(), self._base_target)
+        if app_root is None or app_root.confidence < 0.55:
+            return
+        for item in pending:
+            meta = dict(item.metadata or {})
+            if str(meta.get("intent") or "") != "http_surface_map":
+                continue
+            if not url_is_app_content_mapped(item.path, findings.values(), app_root):
+                continue
+            meta["intent"] = "security_posture_audit"
+            meta["generated_by"] = "security_posture"
+            meta["analysis_focus"] = "security_posture"
+            item.metadata = meta
+            item.reason = "Audit security headers, cookie flags, and CSRF tokens on this surface."
+            item.priority = max(item.priority, 0.96)
+
     def _next_unlocked(self) -> Hypothesis | None:
         pending = [item for item in self._items.values() if item.status == "pending"]
+        self._promote_pending_analysis(pending)
         pending = self._focused_pending(pending)
         if not pending:
             return None
@@ -209,6 +230,7 @@ class HypothesisQueue:
 
     def _next_by_id_unlocked(self, hypothesis_id: str) -> Hypothesis | None:
         pending = [item for item in self._items.values() if item.status == "pending"]
+        self._promote_pending_analysis(pending)
         for item in self._focused_pending(pending):
             if item.id == hypothesis_id:
                 item.status = "in_progress"
@@ -223,6 +245,7 @@ class HypothesisQueue:
 
     def _pending_list_unlocked(self) -> list[Hypothesis]:
         pending = [item for item in self._items.values() if item.status == "pending"]
+        self._promote_pending_analysis(pending)
         pending = self._focused_pending(pending)
         return sorted(
             pending,

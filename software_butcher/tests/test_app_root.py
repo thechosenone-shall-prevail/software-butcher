@@ -433,6 +433,36 @@ def test_store_queues_followups_after_minimal_hall_map(tmp_path):
     assert store.queue.next() is not None
 
 
+def test_queue_promotes_surface_map_to_posture_after_hall_mapped():
+    finding = Finding(
+        hypothesis="surface map",
+        path="http://example.edu/hall/",
+        provenance="http_surface:map",
+        metadata={
+            "capability": "http_surface_map",
+            "content_analysis": True,
+            "mapped_target": "http://example.edu/hall/",
+        },
+    )
+    queue = HypothesisQueue()
+    base = "http://example.edu/hall/"
+    findings = {finding.id: finding}
+    queue.configure(findings=findings, engagement_type="assessment", base_target=base)
+    queue.add(
+        Hypothesis(
+            path="http://example.edu/hall/",
+            reason="stale remap",
+            source_finding_id=finding.id,
+            priority=0.99,
+            metadata={"generated_by": "app_link_expand", "intent": "http_surface_map"},
+        ),
+        base_target=base,
+    )
+    n = queue.next()
+    assert n is not None
+    assert (n.metadata or {}).get("intent") == "security_posture_audit"
+
+
 def test_queue_next_prefers_hall_over_phpinfo_when_analysis_incomplete():
     """Regression: stale infra in queue must not win when /hall app work remains."""
     finding = _surface_finding(
