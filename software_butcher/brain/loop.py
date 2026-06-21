@@ -17,7 +17,7 @@ from software_butcher.core.adapter import AdapterRequest
 from software_butcher.core.assets import Asset
 from software_butcher.core.registry import DEFAULT_REGISTRY, AdapterRegistry, Registry, default_registry
 from software_butcher.core.router import AssetRouter, RouteDecision
-from software_butcher.core.runner import SafeRunner
+from software_butcher.synthesis.report import Synthesizer
 from software_butcher.core.recon_seed import ensure_host_recon_hypothesis, next_recon_hypothesis
 from software_butcher.core.scope import Scope
 from software_butcher.core.url_utils import base_web_url, engagement_entry_url, host_key
@@ -1110,7 +1110,7 @@ def run_brain_once(
             )
             
             content = llm_response.choices[0].message.content
-            llm_decision = json.loads(content) if content else {}
+            llm_decision = Synthesizer._loads_or_salvage(content) or {}
             capability = llm_decision.get("capability")
             if capability in (None, "None", "null", ""):
                 capability = None

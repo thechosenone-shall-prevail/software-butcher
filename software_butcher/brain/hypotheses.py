@@ -449,8 +449,23 @@ class HypothesisGenerator:
         """Seed deep-analysis hypotheses (redirect/posture/phpMyAdmin/DoS/CVE) from a surface map."""
         followups: list[Hypothesis] = []
         path = finding.path
+        content_pages = meta.get("content_pages") or []
+        seeded_redirect: set[str] = set()
+        seeded_posture: set[str] = set()
+        seeded_pma: set[str] = set()
+        seeded_dos: set[str] = set()
+        seeded_cve: set[str] = set()
 
-        def _seed(intent: str, reason: str, priority: float, generated_by: str, focus: str | None = None) -> None:
+        def _seed_at(
+            page_url: str,
+            intent: str,
+            reason: str,
+            priority: float,
+            generated_by: str,
+            focus: str | None = None,
+        ) -> None:
+            if is_noise_path(page_url):
+                return
             metadata = {
                 "intent": intent,
                 "asset_type": "web_endpoint",
@@ -461,7 +476,7 @@ class HypothesisGenerator:
                 metadata["analysis_focus"] = focus
             followups.append(
                 Hypothesis(
-                    path=path,
+                    path=page_url,
                     reason=reason,
                     source_finding_id=finding.id,
                     priority=priority,
@@ -469,65 +484,115 @@ class HypothesisGenerator:
                 )
             )
 
-        content_pages = meta.get("content_pages") or []
+        def _page_needs_redirect_audit(page: dict, page_url: str) -> bool:
+            if bool(page.get("redirect_body_leak_suspected")) or any(
+                entry.get("leak_suspected")
+                for entry in as_dict_list(page.get("redirect_observations"))
+            ):
+                return True
+            observations = as_dict_list(page.get("redirect_observations"))
+            if not observations:
+                return False
+            if any(int(entry.get("status") or 0) in {301, 302} for entry in observations):
+                return True
+            if page_url.lower().endswith(".php"):
+                return True
+            return False
 
-        # Redirect-body leak (auth-after-render) — per mapped URL, including organic expansion pages.
-        if meta.get("redirect_body_leak_suspected"):
-            _seed(
+        def _iter_audit_pages() -> list[tuple[str, dict]]:
+            pages: list[tuple[str, dict]] = []
+            seen: set[str] = set()
+            if path and meta.get("content_analysis"):
+                key = path.rstrip("/").lower()
+                if key not in seen:
+                    seen.add(key)
+                    pages.append((path, meta))
+            for page in content_pages:
+                page_url = str(page.get("url") or "")
+                if not page_url:
+                    continue
+                key = page_url.rstrip("/").lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                pages.append((page_url, page))
+            return pages
+
+        audit_pages = _iter_audit_pages()
+
+        if meta.get("redirect_body_leak_suspected") and path:
+            key = path.rstrip("/").lower()
+            if key not in seeded_redirect:
+                seeded_redirect.add(key)
+                _seed_at(
+                    path,
+                    "redirect_body_audit",
+                    "A 3xx hop returned a large/structured body — confirm auth-after-render data leak.",
+                    0.94,
+                    "redirect_audit",
+                    focus="redirect_body",
+                )
+
+        for page_url, page in audit_pages:
+            if not _page_needs_redirect_audit(page, page_url):
+                continue
+            key = page_url.rstrip("/").lower()
+            if key in seeded_redirect:
+                continue
+            seeded_redirect.add(key)
+            _seed_at(
+                page_url,
                 "redirect_body_audit",
-                "A 3xx hop returned a large/structured body — confirm auth-after-render data leak.",
-                0.94,
+                (
+                    "Redirect hop on this page returned a large/structured body — "
+                    "confirm auth-after-render data leak."
+                ),
+                0.96,
                 "redirect_audit",
                 focus="redirect_body",
             )
 
         for page in content_pages:
             page_url = str(page.get("url") or "")
-            if not page_url:
+            if not page_url or is_noise_path(page_url):
                 continue
-            page_leak = bool(page.get("redirect_body_leak_suspected")) or any(
-                entry.get("leak_suspected")
-                for entry in as_dict_list(page.get("redirect_observations"))
+            key = page_url.rstrip("/").lower()
+            if key in seeded_posture:
+                continue
+            seeded_posture.add(key)
+            _seed_at(
+                page_url,
+                "security_posture_audit",
+                "Audit security headers, cookie flags, and CSRF tokens on this surface.",
+                0.7,
+                "security_posture",
+                focus="security_posture",
             )
-            if not page_leak:
-                continue
-            followups.append(
-                Hypothesis(
-                    path=page_url,
-                    reason=(
-                        "Redirect hop on this page returned a large/structured body — "
-                        "confirm auth-after-render data leak."
-                    ),
-                    source_finding_id=finding.id,
-                    priority=0.96,
-                    metadata={
-                        "intent": "redirect_body_audit",
-                        "asset_type": "web_endpoint",
-                        "generated_by": "redirect_audit",
-                        "analysis_focus": "redirect_body",
-                        "organically_discovered": True,
-                    },
+
+        if path and meta.get("content_analysis") and not is_noise_path(path):
+            key = path.rstrip("/").lower()
+            if key not in seeded_posture:
+                seeded_posture.add(key)
+                _seed_at(
+                    path,
+                    "security_posture_audit",
+                    "Audit security headers, cookie flags, and CSRF tokens on this surface.",
+                    0.7,
+                    "security_posture",
+                    focus="security_posture",
                 )
-            )
 
-        # Security posture / CSRF — cheap deterministic audit on every mapped URL.
-        _seed(
-            "security_posture_audit",
-            "Audit security headers, cookie flags, and CSRF tokens on this surface.",
-            0.7,
-            "security_posture",
-            focus="security_posture",
-        )
-
-        # phpMyAdmin reasoned follow-up.
-        page_type = str(meta.get("page_type") or "")
-        is_pma = (
-            page_type == "phpmyadmin"
-            or "phpmyadmin" in path.lower()
-            or any(str(p.get("page_type") or "") == "phpmyadmin" for p in content_pages)
-        )
-        if is_pma:
-            _seed(
+        for page_url, page in audit_pages:
+            page_type = str(page.get("page_type") or "")
+            is_pma = page_type == "phpmyadmin" or "phpmyadmin" in page_url.lower()
+            if not is_pma:
+                continue
+            key = page_url.rstrip("/").lower()
+            if key in seeded_pma:
+                continue
+            seeded_pma.add(key)
+            _seed_at(
+                page_url,
                 "phpmyadmin_assess",
                 "phpMyAdmin reachable — assess version, default creds, and version-gated CVEs (not a 403 dead-end).",
                 0.9,
@@ -535,12 +600,15 @@ class HypothesisGenerator:
                 focus="broken_access",
             )
 
-        # DoS / resource-exhaustion reasoning on DB-backed / form endpoints.
-        has_db_or_forms = bool(meta.get("mysql_signals") or meta.get("form_count")) or any(
-            p.get("mysql_signals") or p.get("form_count") for p in content_pages
-        )
-        if has_db_or_forms:
-            _seed(
+        for page_url, page in audit_pages:
+            if not (page.get("mysql_signals") or page.get("form_count")):
+                continue
+            key = page_url.rstrip("/").lower()
+            if key in seeded_dos:
+                continue
+            seeded_dos.add(key)
+            _seed_at(
+                page_url,
                 "dos_viability",
                 "DB-backed/form endpoint — reason about resource exhaustion when rate limiting is absent.",
                 0.6,
@@ -548,12 +616,16 @@ class HypothesisGenerator:
                 focus="resource_exhaustion",
             )
 
-        # Version-gated CVE viability — real capability name (not cve_lookup).
-        has_versions = bool(meta.get("php_version") or meta.get("stack_cve_candidates")) or any(
-            p.get("php_version") or p.get("stack_cve_candidates") for p in content_pages
-        )
-        if has_versions and not meta.get("stack_cve_viability_checked"):
-            _seed(
+        for page_url, page in audit_pages:
+            has_versions = bool(page.get("php_version") or page.get("stack_cve_candidates"))
+            if not has_versions or page.get("stack_cve_viability_checked"):
+                continue
+            key = page_url.rstrip("/").lower()
+            if key in seeded_cve:
+                continue
+            seeded_cve.add(key)
+            _seed_at(
+                page_url,
                 "stack_cve_intel",
                 "Observed stack versions — reason about version-gated CVE viability before generic scanners.",
                 0.85,

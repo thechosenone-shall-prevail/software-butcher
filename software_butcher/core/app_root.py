@@ -417,13 +417,18 @@ def hypothesis_in_application_scope(
     if engagement_type != "assessment" or app_root is None or app_root.confidence < 0.55:
         return True
 
+    findings_list = list(findings.values())
+    incomplete = app_subtree_analysis_incomplete(findings_list, app_root)
     path = hypothesis.path
     meta = hypothesis.metadata or {}
 
     if url_under_application_root(path, app_root):
         return True
 
-    if is_infrastructure_url(path, findings.values()):
+    if incomplete and is_infrastructure_url(path, findings_list):
+        return False
+
+    if is_infrastructure_url(path, findings_list):
         return True
 
     entry = engagement_entry_url(base_target).rstrip("/") if base_target else ""
@@ -433,11 +438,11 @@ def hypothesis_in_application_scope(
     if _hypothesis_traces_to_app(hypothesis, app_root, findings):
         return True
 
-    if is_stack_host_surface(path, findings.values()) and not is_infrastructure_url(path, findings.values()):
+    if is_stack_host_surface(path, findings_list) and not is_infrastructure_url(path, findings_list):
         return False
 
     if str(meta.get("generated_by") or "") in {"redirect_audit", "security_posture", "phpmyadmin_assess", "dos_viability"}:
-        if url_under_application_root(path, app_root) or is_infrastructure_url(path, findings.values()):
+        if url_under_application_root(path, app_root) or is_infrastructure_url(path, findings_list):
             return True
 
     parsed = urlsplit(path)
@@ -508,6 +513,83 @@ def app_scope_work_pending(
     return maps, redirects
 
 
+def _page_content_mapped(page: dict) -> bool:
+    return bool(page.get("conclusions") or page.get("form_count") is not None or page.get("page_type"))
+
+
+def _page_redirect_leak_suspected(page: dict) -> bool:
+    return bool(page.get("redirect_body_leak_suspected")) or any(
+        entry.get("leak_suspected")
+        for entry in as_dict_list(page.get("redirect_observations"))
+    )
+
+
+def _iter_app_pages_with_data(
+    findings: Iterable[Finding],
+    app_root: ApplicationRoot,
+) -> Iterable[tuple[str, dict]]:
+    for finding in findings:
+        meta = finding.metadata or {}
+        for page in meta.get("content_pages") or []:
+            url = str(page.get("url") or "")
+            if url_under_application_root(url, app_root):
+                yield url, page
+        if url_under_application_root(finding.path, app_root) and meta.get("content_analysis"):
+            yield finding.path, meta
+
+
+def _findings_url_looks_like_phpmyadmin(url: str, page: dict) -> bool:
+    return "phpmyadmin" in url.lower() or str(page.get("page_type") or "") == "phpmyadmin"
+
+
+def _findings_url_has_resource_exhaustion(page: dict) -> bool:
+    return bool(page.get("mysql_signals") or page.get("form_count"))
+
+
+def _findings_has_stack_versions(page: dict) -> bool:
+    return bool(page.get("php_version") or page.get("stack_cve_candidates"))
+
+
+def _findings_stack_cve_checked(page: dict) -> bool:
+    return bool(page.get("stack_cve_viability_checked"))
+
+
+def app_subtree_analysis_incomplete(
+    findings: Iterable[Finding],
+    app_root: ApplicationRoot,
+) -> bool:
+    """True while app-subtree mapping or deep-analysis capabilities remain outstanding."""
+    findings_list = list(findings)
+    pending_maps, pending_redirects = app_scope_work_pending(findings_list, app_root)
+    if pending_maps or pending_redirects:
+        return True
+
+    for url, page in _iter_app_pages_with_data(findings_list, app_root):
+        if not _page_content_mapped(page):
+            continue
+        if not _capability_observed_on_url(findings_list, url, "security_posture_audit"):
+            return True
+        if _page_redirect_leak_suspected(page) and not _capability_observed_on_url(
+            findings_list, url, "redirect_body_audit"
+        ):
+            return True
+        if _findings_url_looks_like_phpmyadmin(url, page) and not _capability_observed_on_url(
+            findings_list, url, "phpmyadmin_assess"
+        ):
+            return True
+        if (
+            _findings_has_stack_versions(page)
+            and not _findings_stack_cve_checked(page)
+            and not _capability_observed_on_url(findings_list, url, "stack_cve_intel")
+        ):
+            return True
+        if _findings_url_has_resource_exhaustion(page) and not _capability_observed_on_url(
+            findings_list, url, "dos_viability"
+        ):
+            return True
+    return False
+
+
 def assessment_serializes_branches(
     app_root: ApplicationRoot | None,
     findings: Iterable[Finding],
@@ -517,13 +599,17 @@ def assessment_serializes_branches(
     """Assessment runs single-branch once an application root is inferred."""
     if engagement_type != "assessment" or app_root is None or app_root.confidence < 0.55:
         return False, ""
-    pending_maps, pending_redirects = app_scope_work_pending(findings, app_root)
-    if pending_maps or pending_redirects:
-        return (
-            True,
-            f"app_scope_serialize: {len(pending_maps)} unmapped app URL(s), "
-            f"{len(pending_redirects)} redirect audit(s) pending",
-        )
+    findings_list = list(findings)
+    if app_subtree_analysis_incomplete(findings_list, app_root):
+        pending_maps, pending_redirects = app_scope_work_pending(findings_list, app_root)
+        parts: list[str] = []
+        if pending_maps:
+            parts.append(f"{len(pending_maps)} unmapped app URL(s)")
+        if pending_redirects:
+            parts.append(f"{len(pending_redirects)} redirect audit(s) pending")
+        if not parts:
+            parts.append("deep analysis incomplete on mapped app pages")
+        return True, f"app_scope_serialize: {', '.join(parts)}"
     return True, f"assessment_app_focus: app root {app_root.url} — single branch"
 
 
@@ -535,8 +621,7 @@ def filter_assessment_pending(
     """Prefer app-subtree hypotheses; keep stack/dashboard/host-root out until app work is done."""
     findings_list = list(findings.values())
     app_hyps = [h for h in pending if url_under_application_root(h.path, app_root)]
-    pending_maps, pending_redirects = app_scope_work_pending(findings_list, app_root)
-    if pending_maps or pending_redirects:
+    if app_subtree_analysis_incomplete(findings_list, app_root):
         return app_hyps
 
     if app_hyps:
@@ -563,9 +648,11 @@ def application_scope_priority_boost(
     if app_root is None or app_root.confidence < 0.55:
         return 0.0
 
+    findings_list = list(findings.values())
+    incomplete = app_subtree_analysis_incomplete(findings_list, app_root)
     meta = hypothesis.metadata or {}
     generated_by = str(meta.get("generated_by") or "")
-    pending = {_normalize(u) for u in app_root_pending_urls(findings.values(), app_root)}
+    pending = {_normalize(u) for u in app_root_pending_urls(findings_list, app_root)}
     path_norm = _normalize(hypothesis.path)
 
     if url_under_application_root(hypothesis.path, app_root):
@@ -576,10 +663,17 @@ def application_scope_priority_boost(
             boost += 0.25
         return boost
 
-    if is_infrastructure_url(hypothesis.path, findings.values()):
+    if incomplete:
+        if is_infrastructure_url(hypothesis.path, findings_list):
+            return -0.8
+        if is_stack_host_surface(hypothesis.path, findings_list):
+            return -0.8
+        return -0.5
+
+    if is_infrastructure_url(hypothesis.path, findings_list):
         return -0.25 if pending else 0.0
 
-    if is_stack_host_surface(hypothesis.path, findings.values()):
+    if is_stack_host_surface(hypothesis.path, findings_list):
         return -0.65
 
     return -0.5

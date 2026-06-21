@@ -1,8 +1,10 @@
 """Tests for the new web-audit analyzers and capability wiring."""
 
 from software_butcher.brain.capability_resolver import resolve_capability
+from software_butcher.brain.hypotheses import HypothesisGenerator
 from software_butcher.brain.prompts import build_brain_capability_prompt
 from software_butcher.core.registry import default_registry
+from software_butcher.state.schema import Finding
 from software_butcher.shelves.web.redirect_audit import (
     analyze_redirect_bodies,
     chain_leak_suspected,
@@ -130,3 +132,51 @@ def test_csrf_token_present_no_gap():
 def test_parse_forms_method_default_get():
     forms = parse_forms('<form action="/search"><input name="q"></form>')
     assert forms[0].method == "GET"
+
+
+def test_web_audit_followups_seed_security_posture_per_content_page():
+    finding = Finding(
+        hypothesis="surface map",
+        path="http://t.example.edu/hall",
+        provenance="http_surface:map",
+        metadata={
+            "capability": "http_surface_map",
+            "content_pages": [
+                {"url": "http://t.example.edu/hall/admin.php", "form_count": 0, "conclusions": ["admin"]},
+                {"url": "http://t.example.edu/hall/report.php", "form_count": 1, "conclusions": ["report"]},
+            ],
+        },
+    )
+    hyps = HypothesisGenerator().generate(finding, engagement_type="assessment")
+    posture = [
+        h for h in hyps
+        if (h.metadata or {}).get("intent") == "security_posture_audit"
+    ]
+    paths = {h.path for h in posture}
+    assert "http://t.example.edu/hall/admin.php" in paths
+    assert "http://t.example.edu/hall/report.php" in paths
+    assert finding.path not in paths
+
+
+def test_web_audit_followups_seed_redirect_on_php_redirect_observations():
+    finding = Finding(
+        hypothesis="surface map",
+        path="http://t.example.edu/hall",
+        provenance="http_surface:map",
+        metadata={
+            "capability": "http_surface_map",
+            "content_pages": [
+                {
+                    "url": "http://t.example.edu/hall/admin.php",
+                    "form_count": 0,
+                    "redirect_observations": [{"status": 302, "location": "/login.php", "leak_suspected": False}],
+                },
+            ],
+        },
+    )
+    hyps = HypothesisGenerator().generate(finding, engagement_type="assessment")
+    redirect = [
+        h for h in hyps
+        if (h.metadata or {}).get("intent") == "redirect_body_audit"
+    ]
+    assert any(h.path == "http://t.example.edu/hall/admin.php" for h in redirect)

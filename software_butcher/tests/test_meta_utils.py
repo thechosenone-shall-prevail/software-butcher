@@ -14,6 +14,15 @@ from software_butcher.state.engagement import EngagementState
 from software_butcher.state.schema import Finding, Hypothesis
 
 
+def _posture_finding(url: str) -> Finding:
+    return Finding(
+        hypothesis="security posture",
+        path=url,
+        provenance="web_audit:security_posture",
+        metadata={"capability": "security_posture_audit", "mapped_target": url},
+    )
+
+
 def test_as_dict_rejects_list():
     assert as_dict([]) == {}
     assert as_dict({"detected": True})["detected"] is True
@@ -117,9 +126,9 @@ def test_assessment_always_single_branch_when_app_root_known():
         path="http://example.edu/hall/index.php",
         provenance="http_surface:map",
         metadata={
-            "content_pages": [
-                {"url": "http://example.edu/hall/index.php", "form_count": 1, "conclusions": ["forms"]},
-            ],
+                "content_pages": [
+                    {"url": "http://example.edu/hall/index.php", "form_count": 0, "conclusions": ["forms"]},
+                ],
             "app_expand": {"expanded_urls": ["http://example.edu/hall/admin.php"]},
         },
     )
@@ -129,6 +138,11 @@ def test_assessment_always_single_branch_when_app_root_known():
     finding.metadata["content_pages"].append(
         {"url": "http://example.edu/hall/admin.php", "form_count": 0, "conclusions": ["admin"]},
     )
-    serial, reason = assessment_serializes_branches(app_root, [finding], engagement_type="assessment")
+    complete_findings = [
+        finding,
+        _posture_finding("http://example.edu/hall/index.php"),
+        _posture_finding("http://example.edu/hall/admin.php"),
+    ]
+    serial, reason = assessment_serializes_branches(app_root, complete_findings, engagement_type="assessment")
     assert serial is True
     assert "assessment_app_focus" in reason
