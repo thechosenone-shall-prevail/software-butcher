@@ -15,6 +15,27 @@ def test_cluster_theme_auth():
     assert cluster_theme(finding) == "auth_bypass"
 
 
+def test_assessment_sqli_cluster_weight_lower_than_pii():
+    sqli = Finding(
+        hypothesis="database error syntax",
+        path="http://example.com/login",
+        provenance="test",
+        evidence=["database error", "syntax error"],
+        metadata={"branch_id": "b1"},
+    )
+    pii = Finding(
+        hypothesis="phpinfo disclosure",
+        path="http://example.com/phpinfo.php",
+        provenance="test",
+        evidence=["phpinfo environment"],
+        metadata={"branch_id": "b2"},
+    )
+    sqli.cluster_theme = "sqli"
+    pii.cluster_theme = "pii_exposure"
+    clusters = recompute_clusters([sqli, pii], engagement_type="assessment")
+    assert clusters["pii_exposure"].convergence_score > clusters["sqli"].convergence_score
+
+
 def test_convergence_score_increases_with_branches():
     findings = [
         Finding(

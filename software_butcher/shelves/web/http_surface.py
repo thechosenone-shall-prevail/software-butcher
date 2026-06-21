@@ -677,6 +677,8 @@ class HttpSurfaceAdapter:
                         "mysql_signals": page.get("mysql_signals"),
                         "form_count": page.get("form_count"),
                         "discovered_from": surface.get("target"),
+                        "stack_cve_candidates": page.get("stack_cve_candidates"),
+                        "stack_cve_viability_checked": page.get("stack_cve_viability_checked"),
                     },
                 }
             )

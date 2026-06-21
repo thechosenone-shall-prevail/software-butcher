@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from software_butcher.shelves.web.stack_cve_intel import analyze_stack_cve_viability
+
 PHP_VERSION_HEADER_RE = re.compile(r"PHP[/\s]?([\d.]+)", re.I)
 PHPINFO_VERSION_RE = re.compile(r"PHP Version\s*<[^>]*>\s*([\d.]+)", re.I)
 MYSQL_SIGNALS = (
@@ -119,6 +121,23 @@ def analyze_page_content(
     if title and not conclusions:
         conclusions.append(f"Page title: {title}")
 
+    xampp_detected = "xampp" in text.lower() or (
+        "apache" in server.lower() and "xampp" in text.lower()
+    )
+    stack_cve = analyze_stack_cve_viability(
+        url=url,
+        php_version=php_version,
+        server_header=server,
+        page_type=page_type,
+        phpmyadmin_detected=page_type == "phpmyadmin",
+        phpinfo_exposed=page_type == "phpinfo",
+        xampp_detected=xampp_detected,
+        auth_required=None if page_type != "phpmyadmin" else False,
+    )
+    for cve_conclusion in stack_cve.get("conclusions") or []:
+        if cve_conclusion not in conclusions:
+            conclusions.append(cve_conclusion)
+
     return {
         "url": url,
         "title": title,
@@ -131,4 +150,6 @@ def analyze_page_content(
         "technologies": [t for t in (f"PHP/{php_version}" if php_version else None, f"Server:{server}" if server else None) if t],
         "conclusions": conclusions,
         "content_analysis": True,
+        "stack_cve_candidates": stack_cve.get("stack_cve_candidates") or [],
+        "stack_cve_viability_checked": stack_cve.get("stack_cve_viability_checked", False),
     }

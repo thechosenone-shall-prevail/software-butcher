@@ -9,9 +9,12 @@ from urllib.parse import urlsplit
 from software_butcher.state.schema import ConvergenceCluster, Finding
 
 THEME_SIGNALS: list[tuple[str, tuple[str, ...]]] = [
+    ("pii_exposure", ("phpinfo", "information disclosure", "config exposure", "environment variable", "pii")),
+    ("misconfig", ("misconfig", "default cred", "directory listing", "xampp", "resource exhaustion", "connection pool")),
+    ("broken_access", ("phpmyadmin", "admin panel", "unauthenticated", "missing auth", "idor", "access control")),
     ("ssrf", ("ssrf", "server-side request", "url fetch")),
     ("auth_bypass", ("auth bypass", "login bypass", "session created", "auth_bypass")),
-    ("sqli", ("sql", "injection", "database error", "union select", "sqlmap")),
+    ("sqli", ("database error", "syntax error", "union select", "sql injection", "sqlmap")),
     ("xss", ("xss", "cross-site scripting", "script alert")),
     ("rce", ("rce", "remote code", "shell", "command execution", "foothold")),
     ("privesc", ("privilege", "privesc", "sudo", "suid", "kernel exploit", "root shell")),
@@ -77,7 +80,33 @@ def cluster_theme(finding: Finding) -> str:
     return normalize_cluster_theme(finding, raw)
 
 
-def recompute_clusters(findings: Iterable[Finding]) -> dict[str, ConvergenceCluster]:
+ASSESSMENT_THEME_WEIGHTS: dict[str, float] = {
+    "sqli": 0.35,
+    "auth_bypass": 0.75,
+    "xss": 0.85,
+    "pii_exposure": 1.25,
+    "misconfig": 1.2,
+    "broken_access": 1.15,
+    "idor": 1.1,
+    "credential": 0.9,
+    "rce": 1.0,
+}
+
+
+def assessment_theme_weight(theme: str, engagement_type: str = "assessment") -> float:
+    """Scale cluster convergence by theme priority for engagement mode."""
+    if (engagement_type or "assessment").lower() not in {"assessment"}:
+        return 1.0
+    if theme.startswith("web_auth:") or theme.startswith("surface_host:"):
+        return 1.05
+    return ASSESSMENT_THEME_WEIGHTS.get(theme, 1.0)
+
+
+def recompute_clusters(
+    findings: Iterable[Finding],
+    *,
+    engagement_type: str = "assessment",
+) -> dict[str, ConvergenceCluster]:
     """Rebuild convergence clusters from all findings."""
     findings_list = list(findings)
     by_theme: dict[str, ConvergenceCluster] = {}
@@ -130,7 +159,8 @@ def recompute_clusters(findings: Iterable[Finding]) -> dict[str, ConvergenceClus
             cap = 0.70
         else:
             cap = 1.0
-        cluster.convergence_score = round(min(cap, max(0.0, raw)), 3)
+        weight = assessment_theme_weight(theme, engagement_type)
+        cluster.convergence_score = round(min(cap, max(0.0, raw * weight)), 3)
 
     return by_theme
 

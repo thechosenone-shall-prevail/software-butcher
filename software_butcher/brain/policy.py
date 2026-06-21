@@ -111,16 +111,12 @@ class BrainPolicy:
         "api key",
         "oauth",
     )
-    SQLI_SIGNALS = (
-        "sql",
-        "mysql",
-        "postgres",
-        "sqlite",
-        "mssql",
-        "injection",
+    SQLI_PROBE_SIGNALS = (
         "database error",
         "syntax error",
         "union select",
+        "sql injection",
+        "you have an error in your sql",
     )
     EXPLOIT_SIGNALS = (
         "cve-",
@@ -269,8 +265,8 @@ class BrainPolicy:
                 reason="Discovery evidence indicates IaC configuration; using Checkov/Terrascan.",
             )
 
-        # ── NEW: SQL injection evidence ──────────────────────────────────
-        if asset.asset_type in {"web_endpoint", "api"} and self._contains(evidence, self.SQLI_SIGNALS):
+        # SQL injection evidence — error patterns only, not generic mysql mentions
+        if asset.asset_type in {"web_endpoint", "api"} and self._contains(evidence, self.SQLI_PROBE_SIGNALS):
             return PolicyDecision(
                 intent="sql_injection_probing",
                 asset=asset,

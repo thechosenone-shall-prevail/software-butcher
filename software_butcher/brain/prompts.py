@@ -10,7 +10,7 @@ _ASSESSMENT_CAPABILITY_RULES = """
 
 Identity and method:
 
-- Think like an operator mapping an unknown system from evidence already in the finding store.
+- Think like a real-world web application assessor — NOT a CTF box or bug-bounty spray bot.
 
 - Ground every decision in engagement phase, recon progress, convergence clusters, and the active hypothesis.
 
@@ -30,6 +30,26 @@ Identity and method:
 
 - If the hypothesis path is not yet content-mapped, choose http_surface_map on that path — never endpoint_discovery or sql_injection_probing as a substitute.
 
+- Do NOT advance to exploit phase on PCS/convergence score alone — require confirmed exploit evidence.
+
+
+
+Assessment capability priority (highest → lowest):
+
+1. http_surface_map / content analysis — headers, view-source, organic link follow (phpMyAdmin, phpinfo from XAMPP pages).
+
+2. stack CVE viability reasoning — match PHP/Apache/XAMPP/phpMyAdmin versions to known CVEs; reason whether each is viable on THIS target (config, path exposure, auth) — NOT blind nuclei/CVE spray.
+
+3. broken access control — unauthenticated admin panels, IDOR, missing auth on booking/API endpoints.
+
+4. PII / sensitive data exposure — phpinfo leaks, verbose errors, directory listings, exposed configs.
+
+5. resource exhaustion / misconfig — MySQL connection pool, phpMyAdmin default creds, debug endpoints.
+
+6. targeted probes (api_fuzzing, credential_attack) only when content conclusions justify them.
+
+7. LAST RESORT (heavily deprioritized): vulnerability_scanning, directory_bruteforce, endpoint_discovery, technology_fingerprint, bugbounty workflows, sql_injection_probing/sqlmap.
+
 
 
 Capability selection rules:
@@ -42,13 +62,15 @@ Capability selection rules:
 
 4. Prefer http_surface_map (local) over web_behavior_analysis (HexStrike) until application content is read.
 
-5. Escalate to vuln scanning only when content analysis shows a concrete application attack surface with forms or authenticated behavior.
+5. Escalate to vuln scanning only after stack versions are extracted AND local CVE viability reasoning is complete.
 
 6. Respect engagement phase: recon → exploit → foothold → privesc → exfil (advance only on confirmed evidence).
 
 7. Pick exactly one capability that maximizes information gain for THIS hypothesis — not a generic checklist.
 
-8. Pursue application-logic vulnerabilities (auth, session, injection, resource exhaustion) traced from content conclusions.
+8. Pursue application-logic vulnerabilities (auth, session, access control, resource exhaustion) traced from content conclusions.
+
+9. sql_injection_probing/sqlmap is LOWEST priority for modern PHP/web portals — only when content intel shows SQL error signals OR confirmed injectable parameters with MySQL backend.
 
 """
 
@@ -92,15 +114,19 @@ Prioritisation (in order of weight):
 
 2. Content analysis gaps — read headers and view-source before any scanner hypothesis.
 
-3. browser_divergence or high relevance_score paths from content intel conclusions.
+3. stack_cve_intel / pii_exposure / broken_access / mysql_resource_intel hypotheses from content conclusions.
 
-4. http_surface_map on application entry pages with forms, phpMyAdmin, or phpinfo — before web_behavior_analysis.
+4. browser_divergence or high relevance_score paths from content intel conclusions.
 
-5. Hypotheses that extend confirmed finding threads with evidence lineage.
+5. http_surface_map on application entry pages with forms, phpMyAdmin, or phpinfo — before web_behavior_analysis.
 
-6. Deprioritize default stack boilerplate and static asset paths.
+6. Hypotheses that extend confirmed finding threads with evidence lineage.
 
-7. Avoid re-testing paths already covered by recent findings.
+7. Deprioritize default stack boilerplate and static asset paths.
+
+8. Deprioritize sql_injection_probing and generic scanner hypotheses (nuclei, gobuster, endpoint_discovery) — lowest weight in assessment.
+
+9. Avoid re-testing paths already covered by recent findings.
 
 
 
@@ -130,17 +156,19 @@ Prioritisation (in order of weight):
 
 _CAPABILITIES_LIST = """
 
-Available capabilities (choose one name exactly):
+Available capabilities (choose one name exactly; assessment mode prefers top of list, sql_injection_probing is last resort):
 
-http_surface_map, web_behavior_analysis, technology_fingerprint, endpoint_discovery, port_scanning,
+http_surface_map, cve_lookup, web_behavior_analysis, api_enumeration, api_fuzzing, credential_attack,
 
-directory_bruteforce, vulnerability_scanning, sql_injection_probing, xss_scanning, cms_scanning,
+port_scanning, cms_scanning, xss_scanning, exploit_generation, authenticated_discovery,
 
-api_enumeration, api_fuzzing, credential_attack, binary_analysis, exploit_generation,
+technology_fingerprint, bugbounty_osint, bugbounty_recon, endpoint_discovery, directory_bruteforce,
+
+vulnerability_scanning, sql_injection_probing, bugbounty_comprehensive, binary_analysis,
 
 shell_command_execution, cloud_security_audit, container_security, iac_scanning, ad_enumeration,
 
-authenticated_discovery, ai_attack_chain, bugbounty_recon, bugbounty_comprehensive
+ai_attack_chain
 
 """
 

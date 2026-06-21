@@ -125,7 +125,10 @@ class FindingStore:
         return finding
 
     def _recompute_state_unlocked(self) -> None:
-        self.clusters = recompute_clusters(self.findings.values())
+        self.clusters = recompute_clusters(
+            self.findings.values(),
+            engagement_type=self._engagement_type,
+        )
         for finding in self.findings.values():
             apply_cluster_stats(finding, self.clusters)
             process_finding(finding)

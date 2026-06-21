@@ -67,6 +67,15 @@ class AdapterRegistry:
                 caps.append({"capability": c.name, "adapter": adapter.name, "description": c.description})
         return caps
 
+    def list_capabilities_for_engagement(self, engagement_type: str = "assessment") -> list[dict[str, str]]:
+        """Return capabilities ordered by assessment priority (sqlmap last)."""
+        from software_butcher.core.capability_priority import assessment_capability_rank
+
+        caps = self.list_capabilities()
+        if (engagement_type or "assessment").lower() in {"ctf", "lab"}:
+            return caps
+        return sorted(caps, key=lambda item: assessment_capability_rank(item["capability"]))
+
     def list(self) -> list[str]:
         return sorted(self._adapters.keys())
 

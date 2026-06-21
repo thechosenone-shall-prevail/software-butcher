@@ -34,6 +34,7 @@ class HypothesisGenerator:
 
     # ── NEW signal sets ────────────────────────────────────────────────────
     SQLI_SIGNALS = ("database error", "syntax error", "union select", "sql injection", "sqlmap")
+    SQL_ERROR_SIGNALS = ("database error", "syntax error", "union select", "sql injection", "you have an error in your sql")
     CLOUD_SIGNALS = ("aws", "azure", "gcp", "s3", "ec2", "iam", "cloudtrail")
     CONTAINER_SIGNALS = ("docker", "kubernetes", "k8s", "container", "pod", "kubelet")
     CREDENTIAL_SIGNALS = ("password", "hash", "ntlm", "bcrypt", "credential", "brute")
@@ -91,22 +92,97 @@ class HypothesisGenerator:
         if finding.metadata and finding.metadata.get("capability") == "technology_fingerprint":
             technologies = finding.metadata.get("technologies", [])
             for tech in technologies:
-                # Basic check for versioned strings (e.g. "PHP 7.2.0", "Apache 2.4.49")
-                # This could be improved with regex, but splitting is a start.
                 if len(str(tech).split()) >= 2 and any(char.isdigit() for char in str(tech)):
-                    generated.append(
-                        Hypothesis(
-                            path=finding.path,
-                            reason=f"Versioned technology detected ({tech}), needs CVE lookup for known exploits.",
-                            source_finding_id=finding.id,
-                            priority=0.85, # High priority for known vuln lookups
-                            metadata={
-                                "intent": "cve_lookup", 
-                                "asset_type": finding.asset_type,
-                                "technology": tech
-                            },
+                    if et == "assessment":
+                        generated.append(
+                            Hypothesis(
+                                path=finding.path,
+                                reason=(
+                                    f"Versioned stack component ({tech}) — reason about CVE viability locally "
+                                    "from headers/content before nuclei or sqlmap."
+                                ),
+                                source_finding_id=finding.id,
+                                priority=0.88,
+                                metadata={
+                                    "intent": "http_surface_map",
+                                    "asset_type": finding.asset_type,
+                                    "technology": tech,
+                                    "generated_by": "stack_cve_intel",
+                                    "analysis_focus": "stack_cve_viability",
+                                },
+                            )
                         )
+                    else:
+                        generated.append(
+                            Hypothesis(
+                                path=finding.path,
+                                reason=f"Versioned technology detected ({tech}), needs CVE lookup for known exploits.",
+                                source_finding_id=finding.id,
+                                priority=0.85,
+                                metadata={
+                                    "intent": "cve_lookup",
+                                    "asset_type": finding.asset_type,
+                                    "technology": tech,
+                                },
+                            )
+                        )
+
+        meta = finding.metadata or {}
+        if meta.get("content_analysis"):
+            page_type = str(meta.get("page_type") or "")
+            if page_type == "phpinfo":
+                generated.append(
+                    Hypothesis(
+                        path=finding.path,
+                        reason="phpinfo() disclosure — map full config leak and stack CVE viability before scanners.",
+                        source_finding_id=finding.id,
+                        priority=0.96,
+                        metadata={
+                            "intent": "http_surface_map",
+                            "asset_type": finding.asset_type,
+                            "generated_by": "pii_exposure",
+                            "page_type": "phpinfo",
+                            "analysis_focus": "pii_exposure",
+                        },
                     )
+                )
+            if page_type == "phpmyadmin":
+                generated.append(
+                    Hypothesis(
+                        path=finding.path,
+                        reason=(
+                            "phpMyAdmin reachable — test broken access control and default creds "
+                            "before SQL injection probing."
+                        ),
+                        source_finding_id=finding.id,
+                        priority=0.95,
+                        metadata={
+                            "intent": "http_surface_map",
+                            "asset_type": finding.asset_type,
+                            "generated_by": "broken_access",
+                            "page_type": "phpmyadmin",
+                            "analysis_focus": "broken_access",
+                        },
+                    )
+                )
+            if meta.get("stack_cve_viability_checked") or meta.get("stack_cve_candidates"):
+                generated.append(
+                    Hypothesis(
+                        path=finding.path,
+                        reason=(
+                            "Stack versions observed — continue local CVE viability reasoning "
+                            "before generic vulnerability_scanning."
+                        ),
+                        source_finding_id=finding.id,
+                        priority=0.9,
+                        metadata={
+                            "intent": "http_surface_map",
+                            "asset_type": finding.asset_type,
+                            "generated_by": "stack_cve_intel",
+                            "analysis_focus": "stack_cve_viability",
+                        },
+                    )
+                )
 
         if any(signal in text for signal in self.AD_SIGNALS):
             generated.append(
@@ -133,18 +209,22 @@ class HypothesisGenerator:
                 )
             )
 
-        # ── NEW: SQL injection escalation (requires confirmed forms in content intel) ──
-        if finding.asset_type in {"web_endpoint", "api"} and self._has_actionable_forms(finding):
-            if any(signal in text for signal in self.SQLI_SIGNALS):
-                generated.append(
-                    Hypothesis(
-                        path=finding.path,
-                        reason="SQL/database signals with confirmed forms — SQLMap probing recommended.",
-                        source_finding_id=finding.id,
-                        priority=0.85,
-                        metadata={"intent": "sql_injection_probing", "asset_type": finding.asset_type},
-                    )
+        # SQL injection escalation — assessment requires mysql + forms + SQL error signals
+        if finding.asset_type in {"web_endpoint", "api"} and self._has_actionable_sqli_evidence(finding, text):
+            priority = 0.55 if et == "assessment" else 0.85
+            generated.append(
+                Hypothesis(
+                    path=finding.path,
+                    reason=(
+                        "MySQL backend, forms, and SQL error patterns — SQLMap probing may be warranted."
+                        if et == "assessment"
+                        else "SQL/database signals with confirmed forms — SQLMap probing recommended."
+                    ),
+                    source_finding_id=finding.id,
+                    priority=priority,
+                    metadata={"intent": "sql_injection_probing", "asset_type": finding.asset_type},
                 )
+            )
 
         # ── NEW: XSS escalation ──────────────────────────────────────────
         if finding.asset_type in {"web_endpoint", "api"} and any(signal in text for signal in self.XSS_SIGNALS):
@@ -353,6 +433,17 @@ class HypothesisGenerator:
                 )
 
         return generated
+
+    @staticmethod
+    def _has_actionable_sqli_evidence(finding: Finding, text: str) -> bool:
+        """Assessment-grade SQLi escalation: mysql signals + forms + SQL error patterns."""
+        meta = finding.metadata or {}
+        has_mysql = bool(meta.get("mysql_signals")) or any(
+            s in text for s in ("mysqli", "mysql", "pdo_mysql", "mariadb")
+        )
+        has_forms = HypothesisGenerator._has_actionable_forms(finding)
+        has_errors = any(signal in text for signal in HypothesisGenerator.SQL_ERROR_SIGNALS)
+        return has_mysql and has_forms and has_errors
 
     @staticmethod
     def _has_actionable_forms(finding: Finding) -> bool:

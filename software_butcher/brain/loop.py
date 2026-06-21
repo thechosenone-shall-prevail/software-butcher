@@ -20,6 +20,11 @@ from software_butcher.core.runner import SafeRunner
 from software_butcher.core.recon_seed import ensure_host_recon_hypothesis, next_recon_hypothesis
 from software_butcher.core.scope import Scope
 from software_butcher.core.url_utils import base_web_url, host_key
+from software_butcher.core.capability_priority import (
+    ASSESSMENT_DEPRIORITIZED,
+    ASSESSMENT_GENERIC_SCANNERS,
+    is_assessment_deprioritized,
+)
 from software_butcher.core.path_relevance import is_noise_path, score_path
 from software_butcher.state.recon_checklist import HOST_LEVEL_RECON_CAPABILITIES, mark_host_recon
 from software_butcher.shelves.hexstrike.client import HexstrikeServerUnavailableError
@@ -109,6 +114,17 @@ _FORM_REQUIRED_CAPABILITIES = frozenset({
     "sql_injection_probing",
 })
 
+_SQL_ERROR_SIGNALS = (
+    "database error",
+    "syntax error",
+    "union select",
+    "sql injection",
+    "you have an error in your sql",
+    "sqlstate",
+)
+
+_DB_BACKEND_SIGNALS = ("mysqli", "mysql", "pdo_mysql", "mariadb", "database")
+
 
 def _host_findings(store: FindingStore, host: str) -> list[Finding]:
     if not host:
@@ -189,6 +205,66 @@ def _host_has_application_surface(store: FindingStore, host: str) -> bool:
             if page.get("form_count") or page.get("mysql_signals"):
                 return True
     return False
+
+
+def _host_has_stack_versions(store: FindingStore, host: str) -> bool:
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        if meta.get("php_version") or meta.get("stack_cve_candidates"):
+            return True
+        if any("php/" in str(t).lower() or "apache" in str(t).lower() for t in (meta.get("technologies") or [])):
+            return True
+        for page in meta.get("content_pages") or []:
+            if page.get("php_version") or page.get("stack_cve_candidates"):
+                return True
+    return False
+
+
+def _host_stack_cve_checked(store: FindingStore, host: str) -> bool:
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        if meta.get("stack_cve_viability_checked"):
+            return True
+        for page in meta.get("content_pages") or []:
+            if page.get("stack_cve_viability_checked"):
+                return True
+    return False
+
+
+def _url_content_blob(store: FindingStore, host: str, target_url: str) -> str:
+    target = _normalize_url(target_url)
+    chunks: list[str] = []
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        paths = [(_normalize_url(finding.path), meta)]
+        for page in meta.get("content_pages") or []:
+            paths.append((_normalize_url(str(page.get("url") or "")), page))
+        for path, data in paths:
+            if path != target:
+                continue
+            chunks.extend([str(data.get("page_type") or ""), str(data.get("text_preview") or "")])
+            chunks.extend(str(c) for c in (data.get("conclusions") or []))
+            chunks.extend(str(s) for s in (data.get("mysql_signals") or []))
+    return "\n".join(chunks).lower()
+
+
+def _url_has_sql_error_signals(store: FindingStore, host: str, target_url: str) -> bool:
+    blob = _url_content_blob(store, host, target_url)
+    return any(signal in blob for signal in _SQL_ERROR_SIGNALS)
+
+
+def _url_has_db_backend_confirmed(store: FindingStore, host: str, target_url: str) -> bool:
+    blob = _url_content_blob(store, host, target_url)
+    return any(signal in blob for signal in _DB_BACKEND_SIGNALS)
+
+
+def _url_has_actionable_sqli_evidence(store: FindingStore, host: str, target_url: str) -> bool:
+    """Assessment SQLi: mysql backend + forms + SQL error patterns on this URL."""
+    return (
+        _url_has_db_backend_confirmed(store, host, target_url)
+        and _url_has_forms(store, host, target_url)
+        and _url_has_sql_error_signals(store, host, target_url)
+    )
 
 
 def _host_stack_landing_pending_app(store: FindingStore, host: str) -> bool:
@@ -473,6 +549,55 @@ def _apply_scanner_gate(
             options={"capability": "http_surface_map"},
         )
 
+    if (
+        engagement_type == "assessment"
+        and capability == "sql_injection_probing"
+        and not _url_has_actionable_sqli_evidence(store, host, target_url)
+    ):
+        sys.stderr.write(
+            f"[Brain] Assessment SQLi gate on {host}: need mysql backend + forms + SQL error "
+            f"signals on {target_url}\n"
+        )
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=Asset(
+                locator=target_url,
+                asset_type=decision.asset.asset_type,
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="http_surface",
+            reason=(
+                f"Assessment mode — SQLi probing requires SQL error signals or forms with "
+                f"confirmed MySQL backend on {target_url}."
+            ),
+            options={"capability": "http_surface_map"},
+        )
+
+    if (
+        engagement_type == "assessment"
+        and capability == "vulnerability_scanning"
+        and (not _host_has_stack_versions(store, host) or not _host_stack_cve_checked(store, host))
+    ):
+        sys.stderr.write(
+            f"[Brain] Assessment vuln-scan gate on {host}: stack CVE viability not complete\n"
+        )
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=Asset(
+                locator=recon_base,
+                asset_type=decision.asset.asset_type,
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="http_surface",
+            reason=(
+                f"Assessment mode — extract stack versions and complete local CVE viability "
+                f"reasoning before {capability}."
+            ),
+            options={"capability": "http_surface_map", "analysis_focus": "stack_cve_viability"},
+        )
+
     if engagement_type == "assessment" and (
         not _host_has_application_surface(store, host) or _host_stack_landing_pending_app(store, host)
     ):
@@ -492,6 +617,72 @@ def _apply_scanner_gate(
             reason=(
                 f"Host {host} has stack/content intel but no confirmed application entry — "
                 f"continue local analysis instead of {capability}."
+            ),
+            options={"capability": "http_surface_map"},
+        )
+
+    return decision
+
+
+def _apply_assessment_priority_gate(
+    store: FindingStore,
+    hypothesis,
+    decision: PolicyDecision,
+) -> PolicyDecision:
+    """Redirect low-value assessment capabilities to content map or stack CVE reasoning."""
+    if getattr(store, "_engagement_type", "assessment") != "assessment":
+        return decision
+    if (decision.options or {}).get("skip_execute"):
+        return decision
+
+    capability = str((decision.options or {}).get("capability") or decision.intent or "")
+    if not is_assessment_deprioritized(capability):
+        return decision
+
+    # sql_injection_probing: scanner gate validates evidence; allow through if it passed.
+    if capability == "sql_injection_probing":
+        return decision
+
+    host = host_key(hypothesis.path)
+    recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
+    target_url = hypothesis.path.rstrip("/")
+
+    if capability in ASSESSMENT_GENERIC_SCANNERS and not _host_stack_cve_checked(store, host):
+        sys.stderr.write(
+            f"[Brain] Assessment priority gate: {capability} deprioritized — stack CVE reasoning first\n"
+        )
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=Asset(
+                locator=recon_base,
+                asset_type=decision.asset.asset_type,
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="http_surface",
+            reason=(
+                f"Assessment priority — complete stack CVE viability reasoning before {capability}."
+            ),
+            options={"capability": "http_surface_map", "analysis_focus": "stack_cve_viability"},
+        )
+
+    if capability in ASSESSMENT_GENERIC_SCANNERS:
+        sys.stderr.write(
+            f"[Brain] Assessment priority gate: {capability} is last resort — "
+            f"prefer content/access-control analysis\n"
+        )
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=Asset(
+                locator=target_url if score_path(hypothesis.path) >= 0.5 else recon_base,
+                asset_type=decision.asset.asset_type,
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="http_surface",
+            reason=(
+                f"Assessment priority — {capability} deprioritized; continue http_surface_map "
+                f"and stack-specific reasoning first."
             ),
             options={"capability": "http_surface_map"},
         )
@@ -742,6 +933,7 @@ def run_brain_once(
     decision = _apply_path_relevance_gate(store, hypothesis, decision)
     decision = _apply_local_analysis_gate(store, hypothesis, decision)
     decision = _apply_scanner_gate(store, hypothesis, decision)
+    decision = _apply_assessment_priority_gate(store, hypothesis, decision)
 
     route = _route_for_decision(decision, router)
 
