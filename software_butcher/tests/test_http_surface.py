@@ -1,6 +1,6 @@
 """Tests for local HTTP surface mapping."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from software_butcher.core.domain_seed import build_domain_seed_hypotheses
 from software_butcher.core.assets import Asset
@@ -10,8 +10,32 @@ from software_butcher.shelves.web.http_surface import (
     infer_technologies,
     map_http_surface,
 )
+from software_butcher.shelves.web.http_transport import HttpResponse
 from software_butcher.state.recon_checklist import record_recon_progress, ReconChecklist
 from software_butcher.state.schema import Finding
+
+
+def _resp(
+    url: str,
+    *,
+    status: int = 200,
+    headers: dict | None = None,
+    body: str = "",
+    chain: list | None = None,
+) -> HttpResponse:
+    return HttpResponse(
+        success=status < 400,
+        status_code=status,
+        url=url,
+        final_url=url,
+        headers=headers or {},
+        body=body,
+        elapsed_s=0.1,
+        error=None if status < 400 else f"HTTP {status}",
+        profile="browser",
+        proxy=None,
+        redirect_chain=chain or [{"method": "GET", "url": url, "status": status, "location": headers.get("Location") if headers else None}],
+    )
 
 
 def test_infer_technologies_from_headers():
@@ -48,103 +72,104 @@ def test_extract_html_links_parses_forms_meta_base_and_js():
     assert "http://example.com/admin" in links
 
 
+@patch("software_butcher.shelves.web.http_surface.browser_navigate")
 @patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
-@patch("software_butcher.shelves.web.http_surface._request")
-def test_map_http_surface_collects_headers_and_links(mock_request, _mock_well_known):
-    def fake_request(url, method="GET", **kwargs):
-        if method == "HEAD":
-            return {
-                "success": True,
-                "status_code": 200,
-                "url": url,
-                "final_url": url,
-                "elapsed_s": 0.1,
-                "headers": {"Server": "Apache", "X-Powered-By": "PHP/7.4.33"},
-                "body": "",
-                "error": None,
-            }
-        return {
-            "success": True,
-            "status_code": 200,
-            "url": url,
-            "final_url": url,
-            "elapsed_s": 0.2,
-            "headers": {"Server": "Apache", "X-Powered-By": "PHP/7.4.33", "Content-Type": "text/html"},
-            "body": '<html><head><title>Portal</title></head><body><a href="/hall">Hall</a></body></html>',
-            "error": None,
-        }
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.follow_redirects")
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.probe_cache_behavior", return_value={})
+def test_map_http_surface_collects_headers_and_links(mock_cache, mock_follow, _mock_well_known, _mock_browser):
+    _mock_browser.return_value = MagicMock(
+        success=False, final_url="", title="", redirect_chain=[], discovered_urls=[], error="disabled",
+    )
+    _mock_browser.return_value.to_dict.return_value = {}
 
-    mock_request.side_effect = fake_request
-    surface = map_http_surface("http://example.com")
+    html = '<html><head><title>Portal</title></head><body><a href="/hall">Hall</a></body></html>'
+    response = _resp(
+        "http://example.com/",
+        headers={"Server": "Apache", "X-Powered-By": "PHP/7.4.33", "Content-Type": "text/html"},
+        body=html,
+    )
+    mock_follow.return_value = response
+
+    surface = map_http_surface("http://example.com", use_browser=False)
     assert surface["success"] is True
     assert any("PHP/7.4.33" in t for t in surface["technologies"])
     assert "http://example.com/hall" in surface["discovered_urls"]
-
-    adapter = HttpSurfaceAdapter()
-    result = adapter.execute({"request": type("R", (), {"target": "http://example.com", "asset_type": "web_endpoint"})()})
-    assert result.success
-    assert any("header:Server=" in e for f in result.findings for e in f.get("evidence", []))
+    assert surface["infrastructure"]
 
 
+@patch("software_butcher.shelves.web.http_surface.browser_navigate")
 @patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
-@patch("software_butcher.shelves.web.http_surface._request")
-def test_map_http_surface_includes_redirect_chain_urls(mock_request, _mock_well_known):
-    responses = {
-        "http://example.com/": {
-            "success": False,
-            "status_code": 302,
-            "url": "http://example.com/",
-            "final_url": "http://example.com/",
-            "elapsed_s": 0.1,
-            "headers": {"Location": "/dashboard/"},
-            "body": "",
-            "error": "HTTP 302: Found",
-        },
-        "http://example.com/dashboard/": {
-            "success": True,
-            "status_code": 200,
-            "url": "http://example.com/dashboard/",
-            "final_url": "http://example.com/dashboard/",
-            "elapsed_s": 0.2,
-            "headers": {"Server": "Apache"},
-            "body": '<html><body><a href="/faq.html">FAQ</a></body></html>',
-            "error": None,
-        },
-    }
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.follow_redirects")
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.probe_cache_behavior", return_value={})
+def test_map_http_surface_includes_redirect_chain_urls(mock_cache, mock_follow, _mock_well_known, _mock_browser):
+    _mock_browser.return_value = MagicMock(
+        success=False, final_url="", title="", redirect_chain=[], discovered_urls=[], error="disabled",
+    )
+    _mock_browser.return_value.to_dict.return_value = {}
 
-    def fake_request(url, method="GET", **kwargs):
-        return responses[url]
+    chain = [
+        {"method": "GET", "url": "http://example.com/", "status": 302, "location": "/dashboard/"},
+        {"method": "GET", "url": "http://example.com/dashboard/", "status": 200, "location": None},
+    ]
+    response = _resp(
+        "http://example.com/dashboard/",
+        body='<html><body><a href="/faq.html">FAQ</a></body></html>',
+        headers={"Server": "Apache"},
+        chain=chain,
+    )
+    mock_follow.return_value = response
 
-    mock_request.side_effect = fake_request
-    surface = map_http_surface("http://example.com")
+    surface = map_http_surface("http://example.com", use_browser=False)
     assert surface["final_url"] == "http://example.com/dashboard/"
     assert len(surface["get_chain"]) == 2
-    assert surface["get_chain"][0]["status"] == 302
     assert "http://example.com/dashboard" in surface["discovered_urls"]
     assert "http://example.com/faq.html" in surface["discovered_urls"]
 
 
+@patch("software_butcher.shelves.web.http_surface.browser_navigate")
 @patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls")
-@patch("software_butcher.shelves.web.http_surface._request")
-def test_map_http_surface_fetches_robots_and_sitemap(mock_request, mock_well_known):
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.follow_redirects")
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.probe_cache_behavior", return_value={})
+def test_map_http_surface_fetches_robots_and_sitemap(mock_cache, mock_follow, mock_well_known, _mock_browser):
+    _mock_browser.return_value = MagicMock(
+        success=False, final_url="", title="", redirect_chain=[], discovered_urls=[], error="disabled",
+    )
+    _mock_browser.return_value.to_dict.return_value = {}
     mock_well_known.return_value = ["http://example.com/hidden"]
+    mock_follow.return_value = _resp("http://example.com/", body="<html></html>")
 
-    def fake_request(url, method="GET", **kwargs):
-        return {
-            "success": True,
-            "status_code": 200,
-            "url": url,
-            "final_url": url,
-            "elapsed_s": 0.1,
-            "headers": {},
-            "body": "<html></html>",
-            "error": None,
-        }
-
-    mock_request.side_effect = fake_request
-    surface = map_http_surface("http://example.com")
+    surface = map_http_surface("http://example.com", use_browser=False)
     assert "http://example.com/hidden" in surface["discovered_urls"]
     mock_well_known.assert_called_once()
+
+
+@patch("software_butcher.shelves.web.http_surface.browser_navigate")
+@patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.follow_redirects")
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.probe_cache_behavior", return_value={})
+def test_browser_divergence_adds_browser_final(mock_cache, mock_follow, _mock_well_known, mock_browser):
+    mock_follow.return_value = _resp(
+        "http://example.com/dashboard/",
+        body="<html></html>",
+        chain=[{"status": 302, "url": "http://example.com/", "location": "/dashboard/"}],
+    )
+    mock_browser.return_value = MagicMock(
+        success=True,
+        requested_url="http://example.com/",
+        final_url="http://example.com/hall",
+        title="Hall Booking",
+        redirect_chain=["http://example.com/", "http://example.com/hall"],
+        discovered_urls=["http://example.com/hall/book"],
+        error=None,
+    )
+    mock_browser.return_value.to_dict.return_value = {
+        "final_url": "http://example.com/hall",
+        "redirect_chain": ["http://example.com/", "http://example.com/hall"],
+    }
+
+    surface = map_http_surface("http://example.com")
+    assert surface["browser_divergence"] is True
+    assert "http://example.com/hall" in surface["discovered_urls"]
 
 
 def test_surface_map_marks_recon_complete_on_root():

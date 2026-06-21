@@ -433,6 +433,9 @@ def run_brain_once(
                 if key in hypothesis.metadata:
                     adapter_options[key] = hypothesis.metadata[key]
         adapter_options["session_store"] = store.session_store
+        adapter_options["transport_state"] = store.transport_state
+        host = host_key(hypothesis.path)
+        store.transport_state.apply_wait(host)
         request = AdapterRequest(
             objective=decision.intent,
             target=hypothesis.path,

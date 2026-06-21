@@ -1,24 +1,19 @@
-"""Local HTTP surface mapping — HEAD + GET, headers, tech stack, organic link discovery.
-
-Runs entirely in-process (no HexStrike). This replaces the brittle three-step
-web_behavior → technology_fingerprint → endpoint_discovery checklist.
-"""
+"""Local HTTP surface mapping — transport-aware HEAD+GET, browser truth, infrastructure intel."""
 
 from __future__ import annotations
 
 import re
-import ssl
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any
 
 from software_butcher.core.adapter import AdapterCapability, AdapterRequest, AdapterResult
-from software_butcher.core.url_utils import base_web_url, same_origin
+from software_butcher.core.url_utils import base_web_url, host_key, same_origin
 from software_butcher.shelves.hexstrike.interpreter import HexStrikeInterpreter
+from software_butcher.shelves.web.browser_nav import browser_navigate
+from software_butcher.shelves.web.http_transport import SmartHttpTransport, TransportConfig
+from software_butcher.shelves.web.infrastructure_intel import InfrastructureProfile, analyze_infrastructure
+from software_butcher.state.transport_state import TransportState
 
-REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 TECHNOLOGY_HEADERS = (
     "Server",
     "X-Powered-By",
@@ -32,121 +27,10 @@ TECHNOLOGY_HEADERS = (
     "X-Version",
 )
 TITLE_RE = re.compile(r"<title[^>]*>([^<]{1,200})</title>", re.IGNORECASE)
-
-_SSL_CTX = ssl.create_default_context()
-_SSL_CTX.check_hostname = True
-_SSL_CTX.verify_mode = ssl.CERT_REQUIRED
-
+WELL_KNOWN_PATHS = ("/robots.txt", "/sitemap.xml")
 ROBOTS_SITEMAP_RE = re.compile(r"^Sitemap:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
 ROBOTS_PATH_RE = re.compile(r"^(?:Allow|Disallow):\s*(/\S*)", re.IGNORECASE | re.MULTILINE)
 SITEMAP_LOC_RE = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.IGNORECASE)
-WELL_KNOWN_PATHS = ("/robots.txt", "/sitemap.xml")
-
-
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
-        return None
-
-
-_HTTP_OPENER = urllib.request.build_opener(
-    _NoRedirectHandler,
-    urllib.request.HTTPSHandler(context=_SSL_CTX),
-)
-
-
-def _normalize_url(url: str) -> str:
-    parsed = urllib.parse.urlsplit(url.strip())
-    if not parsed.scheme or not parsed.netloc:
-        return url.strip()
-    path = parsed.path or "/"
-    port = f":{parsed.port}" if parsed.port else ""
-    return f"{parsed.scheme}://{parsed.netloc}{port}{path}"
-
-
-def _request(
-    url: str,
-    method: str = "GET",
-    *,
-    timeout: int = 12,
-    max_body: int = 65536,
-) -> dict[str, Any]:
-    req = urllib.request.Request(url, method=method)
-    req.add_header("User-Agent", "SoftwareButcher/1.0 (security-assessment)")
-    req.add_header("Accept", "*/*")
-    t0 = time.monotonic()
-    try:
-        with _HTTP_OPENER.open(req, timeout=timeout) as resp:
-            body = resp.read(max_body)
-            headers = {k: v for k, v in resp.headers.items()}
-            return {
-                "success": True,
-                "status_code": resp.status,
-                "url": url,
-                "final_url": resp.url,
-                "elapsed_s": round(time.monotonic() - t0, 3),
-                "headers": headers,
-                "body": body.decode("utf-8", errors="replace"),
-                "error": None,
-            }
-    except urllib.error.HTTPError as exc:
-        body = b""
-        try:
-            body = exc.read(max_body)
-        except Exception:  # noqa: BLE001
-            pass
-        headers = {k: v for k, v in exc.headers.items()} if exc.headers else {}
-        return {
-            "success": False,
-            "status_code": exc.code,
-            "url": url,
-            "final_url": url,
-            "elapsed_s": round(time.monotonic() - t0, 3),
-            "headers": headers,
-            "body": body.decode("utf-8", errors="replace"),
-            "error": f"HTTP {exc.code}: {exc.reason}",
-        }
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "success": False,
-            "status_code": None,
-            "url": url,
-            "final_url": url,
-            "elapsed_s": round(time.monotonic() - t0, 3),
-            "headers": {},
-            "body": "",
-            "error": str(exc),
-        }
-
-
-def _follow_redirects(url: str, method: str = "GET", *, max_hops: int = 8) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    chain: list[dict[str, Any]] = []
-    current = _normalize_url(url)
-    last = _request(current, method=method)
-    chain.append(
-        {
-            "method": method,
-            "url": current,
-            "status": last.get("status_code"),
-            "location": last.get("headers", {}).get("Location"),
-        }
-    )
-    hops = 0
-    while hops < max_hops and last.get("status_code") in REDIRECT_CODES:
-        location = last.get("headers", {}).get("Location")
-        if not location:
-            break
-        current = urllib.parse.urljoin(current, location)
-        last = _request(current, method=method)
-        chain.append(
-            {
-                "method": method,
-                "url": current,
-                "status": last.get("status_code"),
-                "location": last.get("headers", {}).get("Location"),
-            }
-        )
-        hops += 1
-    return chain, last
 
 
 def infer_technologies(headers: dict[str, str]) -> list[str]:
@@ -224,16 +108,15 @@ def _parse_sitemap_xml(body: str, base: str) -> list[str]:
     return urls
 
 
-def _fetch_well_known_urls(base: str) -> list[str]:
+def _fetch_well_known_urls(transport: SmartHttpTransport, base: str, host: str) -> list[str]:
     urls: list[str] = []
     seen: set[str] = set()
     for path in WELL_KNOWN_PATHS:
         target = urllib.parse.urljoin(base.rstrip("/") + "/", path.lstrip("/"))
-        resp = _request(target, "GET")
-        if resp.get("status_code") != 200:
+        resp = transport.follow_redirects(target, "GET", profile="browser", host=host)
+        if resp.status_code != 200:
             continue
-        body = resp.get("body") or ""
-        parsed = _parse_robots_txt(body, base) if path.endswith("robots.txt") else _parse_sitemap_xml(body, base)
+        parsed = _parse_robots_txt(resp.body, base) if path.endswith("robots.txt") else _parse_sitemap_xml(resp.body, base)
         for url in parsed:
             if url not in seen:
                 seen.add(url)
@@ -241,43 +124,159 @@ def _fetch_well_known_urls(base: str) -> list[str]:
     return urls
 
 
-def map_http_surface(url: str) -> dict[str, Any]:
-    """Run HEAD + GET surface map and return structured observation."""
-    base = base_web_url(url)
-    head_chain, head = _follow_redirects(base, "HEAD")
-    get_chain, get_resp = _follow_redirects(base, "GET")
+def _merge_profiles(*profiles: InfrastructureProfile | None) -> InfrastructureProfile:
+    merged = InfrastructureProfile()
+    for profile in profiles:
+        if not profile:
+            continue
+        merged.waf.extend(x for x in profile.waf if x not in merged.waf)
+        merged.cdn_proxy.extend(x for x in profile.cdn_proxy if x not in merged.cdn_proxy)
+        merged.caching.extend(x for x in profile.caching if x not in merged.caching)
+        merged.conclusions.extend(x for x in profile.conclusions if x not in merged.conclusions)
+        if profile.rate_limit and profile.rate_limit.detected:
+            merged.rate_limit = profile.rate_limit
+    return merged
 
-    headers = get_resp.get("headers") or head.get("headers") or {}
-    technologies = infer_technologies(headers)
-    html = get_resp.get("body") or ""
-    final_url = get_resp.get("final_url") or base
+
+def map_http_surface(
+    url: str,
+    *,
+    scope: dict[str, Any] | None = None,
+    transport_state: TransportState | None = None,
+    use_browser: bool = True,
+) -> dict[str, Any]:
+    """Deep surface map: dual HTTP profiles, infrastructure intel, optional browser truth."""
+    base = base_web_url(url)
+    host = host_key(base)
+    ts = transport_state or TransportState()
+    ts.apply_wait(host)
+
+    config = TransportConfig.from_scope(scope)
+    transport = SmartHttpTransport(config, proxy_index=ts.global_proxy_index)
+
+    def on_rate_limit(h: str, signal) -> None:
+        ts.record_rate_limit(h, signal)
+        if ts.should_rotate_egress(h):
+            transport.rotate_egress(h)
+            ts.record_rotation(h)
+
+    transport.on_rate_limit = on_rate_limit
+
+    browser_get = transport.follow_redirects(base, "GET", profile="browser", host=host)
+    assessment_get = transport.follow_redirects(base, "GET", profile="assessment", host=host)
+    head = transport.follow_redirects(base, "HEAD", profile="browser", host=host)
+
+    headers = browser_get.headers or head.headers or {}
+    html = browser_get.body or ""
+    curl_final = browser_get.final_url or base
+    assessment_final = assessment_get.final_url or base
+
+    infra_browser = analyze_infrastructure(
+        status_code=browser_get.status_code,
+        headers=headers,
+        body=html,
+        elapsed_s=browser_get.elapsed_s,
+    )
+    infra_assessment = analyze_infrastructure(
+        status_code=assessment_get.status_code,
+        headers=assessment_get.headers,
+        body=assessment_get.body,
+        elapsed_s=assessment_get.elapsed_s,
+    )
+    infrastructure = _merge_profiles(infra_browser, infra_assessment)
+
+    cache_probe = transport.probe_cache_behavior(
+        curl_final,
+        prior_etag=headers.get("ETag", ""),
+        prior_headers=headers,
+    )
+    if cache_probe.get("cache_hit"):
+        infrastructure.caching.append("Conditional GET returned 304 — edge cache confirmed")
+        infrastructure.conclusions.append(
+            "Caching confirmed via If-None-Match probe; fingerprint may reflect cached responses."
+        )
+
     interpreter = HexStrikeInterpreter()
-    links = interpreter.extract_html_links(final_url, html) if html else []
-    redirect_urls = _urls_from_redirect_chain(get_chain, base)
-    well_known_urls = _fetch_well_known_urls(base)
+    links = interpreter.extract_html_links(curl_final, html) if html else []
+    redirect_urls = _urls_from_redirect_chain(browser_get.redirect_chain, base)
+    well_known_urls = _fetch_well_known_urls(transport, base, host)
+
+    browser_result = browser_navigate(base, enabled=use_browser)
+    browser_urls: list[str] = []
+    if browser_result.success:
+        browser_urls.extend(browser_result.discovered_urls)
+        for hop in browser_result.redirect_chain:
+            if same_origin(hop, base):
+                browser_urls.append(hop.rstrip("/"))
+
+    profile_divergence = curl_final.rstrip("/") != assessment_final.rstrip("/")
+    browser_divergence = (
+        browser_result.success
+        and browser_result.final_url.rstrip("/") not in {curl_final.rstrip("/"), assessment_final.rstrip("/")}
+    )
 
     discovered: list[str] = []
     seen: set[str] = set()
-    for link in (*redirect_urls, *links, *well_known_urls):
-        if same_origin(link, base) and link not in seen:
-            seen.add(link)
-            discovered.append(link)
+    for link in (*redirect_urls, *links, *well_known_urls, *browser_urls):
+        normalized = link.rstrip("/") if link else ""
+        if normalized and same_origin(normalized, base) and normalized not in seen:
+            seen.add(normalized)
+            discovered.append(normalized)
 
-    title = extract_title(html)
+    if browser_result.success and browser_result.final_url.rstrip("/") not in seen:
+        final = browser_result.final_url.rstrip("/")
+        if same_origin(final, base):
+            seen.add(final)
+            discovered.append(final)
+
+    title = extract_title(html) or browser_result.title
 
     return {
         "target": base,
-        "final_url": final_url,
-        "head_chain": head_chain,
-        "get_chain": get_chain,
-        "status_code": get_resp.get("status_code"),
+        "final_url": curl_final,
+        "browser_final_url": browser_result.final_url if browser_result.success else None,
+        "assessment_final_url": assessment_final,
+        "profile_divergence": profile_divergence,
+        "browser_divergence": browser_divergence,
+        "head_chain": head.redirect_chain,
+        "get_chain": browser_get.redirect_chain,
+        "assessment_chain": assessment_get.redirect_chain,
+        "browser_nav": browser_result.to_dict(),
+        "status_code": browser_get.status_code,
         "headers": headers,
-        "technologies": technologies,
+        "technologies": infer_technologies(headers),
+        "infrastructure": infrastructure.to_dict(),
+        "cache_probe": cache_probe,
         "title": title,
         "discovered_urls": discovered,
-        "error": get_resp.get("error") or head.get("error"),
-        "success": get_resp.get("status_code") is not None or bool(head.get("status_code")),
+        "error": browser_get.error or head.error or browser_result.error,
+        "success": browser_get.status_code is not None or bool(head.status_code) or browser_result.success,
+        "transport": {
+            "proxy": transport.current_proxy,
+            "rate_limit_events": ts.host(host).rate_limit_events,
+            "egress_rotations": ts.host(host).egress_rotations,
+        },
     }
+
+
+# Backward-compatible test hook
+def _request(url: str, method: str = "GET", **kwargs: Any) -> dict[str, Any]:
+    transport = SmartHttpTransport()
+    resp = transport.follow_redirects(url, method, profile="browser")
+    return {
+        "success": resp.success or resp.status_code is not None,
+        "status_code": resp.status_code,
+        "url": resp.url,
+        "final_url": resp.final_url,
+        "elapsed_s": resp.elapsed_s,
+        "headers": resp.headers,
+        "body": resp.body,
+        "error": resp.error,
+    }
+
+
+def _fetch_well_known_urls_legacy(base: str) -> list[str]:
+    return _fetch_well_known_urls(SmartHttpTransport(), base, host_key(base))
 
 
 class HttpSurfaceAdapter:
@@ -285,7 +284,7 @@ class HttpSurfaceAdapter:
     capabilities = (
         AdapterCapability(
             name="http_surface_map",
-            description="Local HEAD+GET surface map: headers, stack, redirects, HTML links",
+            description="Transport-aware surface map: headers, WAF/CDN intel, browser navigation, organic links",
             asset_types=("web_endpoint", "api", "domain"),
         ),
     )
@@ -294,9 +293,19 @@ class HttpSurfaceAdapter:
         return {"adapter": self.name, "request": request, "target": request.target}
 
     def execute(self, plan: dict[str, Any]) -> AdapterResult:
-        target = plan["request"].target
-        surface = map_http_surface(target)
-        findings = self._findings_from_surface(surface, plan["request"].asset_type)
+        request = plan["request"]
+        options = request.options or {}
+        transport_state = options.get("transport_state")
+        scope = request.scope or {}
+        use_browser = options.get("use_browser", True)
+
+        surface = map_http_surface(
+            request.target,
+            scope=scope,
+            transport_state=transport_state,
+            use_browser=use_browser,
+        )
+        findings = self._findings_from_surface(surface, request.asset_type)
         summary = self._summary(surface)
         return AdapterResult(
             adapter=self.name,
@@ -308,27 +317,42 @@ class HttpSurfaceAdapter:
 
     @staticmethod
     def _summary(surface: dict[str, Any]) -> str:
-        tech = ", ".join(surface.get("technologies") or []) or "unknown stack"
+        infra = surface.get("infrastructure") or {}
+        waf = ", ".join(infra.get("waf") or []) or "none detected"
         links = len(surface.get("discovered_urls") or [])
+        browser = surface.get("browser_final_url") or "n/a"
         return (
             f"HTTP surface map for {surface.get('target')}: "
-            f"status={surface.get('status_code')} tech=[{tech}] links={links}"
+            f"status={surface.get('status_code')} waf=[{waf}] links={links} browser_final={browser}"
         )
 
     @staticmethod
     def _findings_from_surface(surface: dict[str, Any], asset_type: str) -> list[dict[str, Any]]:
         headers = surface.get("headers") or {}
+        infra = surface.get("infrastructure") or {}
         evidence: list[str] = [
-            f"final_url={surface.get('final_url')}",
+            f"mapped_target={surface.get('target')}",
+            f"curl_final={surface.get('final_url')}",
             f"status={surface.get('status_code')}",
         ]
+        if surface.get("browser_final_url"):
+            evidence.append(f"browser_final={surface['browser_final_url']}")
+        if surface.get("assessment_final_url"):
+            evidence.append(f"assessment_final={surface['assessment_final_url']}")
+        if surface.get("profile_divergence"):
+            evidence.append("profile_divergence=true (User-Agent changes redirect target)")
+        if surface.get("browser_divergence"):
+            evidence.append("browser_divergence=true (headless browser reached different URL than curl)")
         if surface.get("title"):
             evidence.append(f"title={surface['title']}")
         if surface.get("error"):
             evidence.append(f"error={surface['error']}")
 
         for hop in surface.get("get_chain") or []:
-            evidence.append(f"redirect: {hop.get('status')} {hop.get('url')} -> {hop.get('location') or ''}".rstrip())
+            evidence.append(
+                f"redirect: {hop.get('status')} {hop.get('url')} -> {hop.get('location') or ''} "
+                f"[{hop.get('profile', 'browser')}]".rstrip()
+            )
 
         for name, value in sorted(headers.items()):
             evidence.append(f"header:{name}={value}")
@@ -336,31 +360,70 @@ class HttpSurfaceAdapter:
         for tech in surface.get("technologies") or []:
             evidence.append(f"technology={tech}")
 
+        for conclusion in infra.get("conclusions") or []:
+            evidence.append(f"conclusion={conclusion}")
+
+        rate_limit = infra.get("rate_limit")
+        metadata: dict[str, Any] = {
+            "capability": "http_surface_map",
+            "mapped_target": surface.get("target"),
+            "technologies": list(surface.get("technologies") or []),
+            "endpoints": list(surface.get("discovered_urls") or []),
+            "discovered_urls": list(surface.get("discovered_urls") or []),
+            "headers": headers,
+            "infrastructure": infra,
+            "title": surface.get("title"),
+            "status_code": surface.get("status_code"),
+            "final_url": surface.get("final_url"),
+            "browser_final_url": surface.get("browser_final_url"),
+            "cache_probe": surface.get("cache_probe"),
+            "transport": surface.get("transport"),
+        }
+        if rate_limit and rate_limit.get("detected"):
+            metadata["rate_limited"] = True
+            metadata["transport_action"] = rate_limit.get("recommended_action")
+
         primary = {
             "hypothesis": (
                 f"HTTP surface mapped for {surface.get('target')}: "
-                f"{len(headers)} response headers, {len(surface.get('discovered_urls') or [])} same-origin links."
+                f"{len(headers)} headers, {len(surface.get('discovered_urls') or [])} links, "
+                f"WAF={', '.join(infra.get('waf') or []) or 'none'}."
             ),
             "path": surface.get("target") or surface.get("final_url"),
             "provenance": "http_surface:map",
             "status": "hypothesis",
-            "confidence": 0.72 if surface.get("success") else 0.35,
+            "confidence": 0.78 if surface.get("success") else 0.35,
             "evidence": evidence,
             "asset_type": asset_type,
             "capability": "http_surface_map",
-            "metadata": {
-                "capability": "http_surface_map",
-                "mapped_target": surface.get("target"),
-                "technologies": list(surface.get("technologies") or []),
-                "endpoints": list(surface.get("discovered_urls") or []),
-                "discovered_urls": list(surface.get("discovered_urls") or []),
-                "headers": headers,
-                "title": surface.get("title"),
-                "status_code": surface.get("status_code"),
-                "final_url": surface.get("final_url"),
-            },
+            "metadata": metadata,
         }
         findings = [primary]
+
+        if surface.get("browser_divergence") and surface.get("browser_final_url"):
+            findings.append(
+                {
+                    "hypothesis": (
+                        f"Browser navigation reached {surface['browser_final_url']} "
+                        f"while HTTP client stopped at {surface.get('final_url')} — "
+                        "likely JS/meta redirect or cookie-gated routing."
+                    ),
+                    "path": surface["browser_final_url"],
+                    "provenance": "http_surface:browser_nav",
+                    "status": "hypothesis",
+                    "confidence": 0.85,
+                    "evidence": [
+                        f"browser_chain={' -> '.join((surface.get('browser_nav') or {}).get('redirect_chain') or [])}",
+                        f"curl_final={surface.get('final_url')}",
+                    ],
+                    "asset_type": "web_endpoint",
+                    "metadata": {
+                        "capability": "http_surface_map",
+                        "discovered_from": surface.get("target"),
+                        "discovered_urls": [surface["browser_final_url"]],
+                    },
+                }
+            )
 
         for link in surface.get("discovered_urls") or []:
             findings.append(

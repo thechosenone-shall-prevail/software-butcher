@@ -16,6 +16,7 @@ from .pcs import PCSState, ProgressiveConvergenceSearch
 from .recon_checklist import ReconChecklist, record_recon_progress
 from .schema import ConvergenceCluster, Finding, Hypothesis, SCHEMA_VERSION
 from .session_state import SessionStore
+from .transport_state import TransportState
 from software_butcher.brain.confirmation import process_finding
 from software_butcher.core.url_utils import canonical_web_url, host_key
 
@@ -37,6 +38,7 @@ class FindingStore:
         self.engagement = EngagementState()
         self.pcs = ProgressiveConvergenceSearch()
         self.recon_checklist = ReconChecklist()
+        self.transport_state = TransportState()
         self.clusters: dict[str, ConvergenceCluster] = {}
         self._base_target: str = ""
 
@@ -139,6 +141,7 @@ class FindingStore:
                 "engagement": self.engagement.to_dict(),
                 "pcs": self.pcs.state.to_dict(),
                 "recon": self.recon_checklist.to_dict(),
+                "transport": self.transport_state.to_dict(),
                 "clusters": {k: v.to_dict() for k, v in self.clusters.items()},
             }
             self.path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -161,6 +164,7 @@ class FindingStore:
                 "engagement": self.engagement.to_dict(),
                 "pcs": self.pcs.state.to_dict(),
                 "recon": self.recon_checklist.to_dict(),
+                "transport": self.transport_state.to_dict(),
                 "clusters": {k: v.to_dict() for k, v in self.clusters.items()},
             }
 
@@ -176,6 +180,7 @@ class FindingStore:
         store.engagement = EngagementState.from_dict(payload.get("engagement", {}))
         store.pcs = ProgressiveConvergenceSearch(PCSState.from_dict(payload.get("pcs", {})))
         store.recon_checklist = ReconChecklist.from_dict(payload.get("recon", {}))
+        store.transport_state = TransportState.from_dict(payload.get("transport", {}))
 
         for theme, data in payload.get("clusters", {}).items():
             store.clusters[theme] = ConvergenceCluster.from_dict({**data, "theme": theme})
