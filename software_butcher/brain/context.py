@@ -47,10 +47,18 @@ def build_brain_context(
 
     lines.extend(["", f"Recent findings ({len(sorted_findings)} shown):"])
     for finding in sorted_findings:
+        meta = finding.metadata or {}
+        extra = ""
+        if meta.get("page_summary"):
+            extra += f" summary={str(meta['page_summary'])[:80]}"
+        if meta.get("stack_landing", {}).get("detected"):
+            extra += " [XAMPP/default stack landing]"
+        if meta.get("infrastructure", {}).get("conclusions"):
+            extra += f" | {meta['infrastructure']['conclusions'][0][:80]}"
         lines.append(
             f"  - [{finding.status}] {finding.path} | theme={finding.cluster_theme} "
             f"conf={finding.confidence:.2f} emergent={finding.emergent_confidence:.2f} "
-            f"conv={finding.convergence_score:.2f} | {finding.hypothesis[:100]}"
+            f"conv={finding.convergence_score:.2f} | {finding.hypothesis[:100]}{extra}"
         )
         if finding.evidence:
             lines.append(f"      evidence: {finding.evidence[0][:120]}")

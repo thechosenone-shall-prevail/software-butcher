@@ -8,6 +8,8 @@ tool categories on the HexStrike server.
 from __future__ import annotations
 
 from software_butcher.core.asset_classifier import is_static_asset
+from software_butcher.core.path_relevance import is_noise_path, score_path
+from software_butcher.core.url_utils import base_web_url
 from software_butcher.state.path_graph import parent_path
 from software_butcher.state.schema import Finding, Hypothesis
 
@@ -23,7 +25,7 @@ class HypothesisGenerator:
     no security-relevant signals worth escalating.
     """
 
-    ADMIN_SIGNALS = ("admin", "login", "auth", "dashboard", "portal")
+    ADMIN_SIGNALS = ("admin", "login", "auth", "portal", "signin")
     API_SIGNALS = ("api", "graphql", "swagger", "openapi", "rest")
     AD_SIGNALS = ("ldap", "kerberos", "smb", "active directory", "domain controller")
     BINARY_SIGNALS = ("crash", "overflow", "strcpy", "memcpy", "gets", "format string")
@@ -50,7 +52,8 @@ class HypothesisGenerator:
         path_stem = self._path_stem(finding.path)
 
         if finding.asset_type in {"web_endpoint", "api"}:
-            if any(signal in path_stem for signal in self.ADMIN_SIGNALS):
+            path_score = score_path(finding.path, title=str((finding.metadata or {}).get("title") or ""))
+            if path_score >= 0.6 and any(signal in path_stem for signal in self.ADMIN_SIGNALS):
 
                 generated.append(
                     Hypothesis(
@@ -194,6 +197,41 @@ class HypothesisGenerator:
         # high-priority hypothesis for authenticated discovery of the root
         # path.  This is what unlocks post-auth surface like /dvwa/vulnerabilities/.
         capability = finding.metadata.get("capability") if finding.metadata else None
+
+        # Default stack at root (XAMPP) — real app is elsewhere; discover paths organically
+        stack_landing = (finding.metadata or {}).get("stack_landing") or {}
+        if capability == "http_surface_map" and stack_landing.get("detected"):
+            base = base_web_url(finding.path)
+            generated.append(
+                Hypothesis(
+                    path=base,
+                    reason=stack_landing.get("conclusion") or "Default stack landing detected; discover unlinked application paths.",
+                    source_finding_id=finding.id,
+                    priority=0.97,
+                    metadata={
+                        "intent": "directory_bruteforce",
+                        "asset_type": "web_endpoint",
+                        "generated_by": "stack_mismatch",
+                    },
+                )
+            )
+            if finding.metadata.get("browser_final_url"):
+                bf = str(finding.metadata["browser_final_url"])
+                if score_path(bf) >= 0.5:
+                    generated.append(
+                        Hypothesis(
+                            path=bf,
+                            reason="Headless browser reached a different URL than HTTP client — map application entry.",
+                            source_finding_id=finding.id,
+                            priority=0.98,
+                            metadata={
+                                "intent": "http_surface_map",
+                                "asset_type": "web_endpoint",
+                                "generated_by": "browser_divergence",
+                            },
+                        )
+                    )
+
         if capability == "auth_bypass_confirmed":
             # Walk up to the site root for authenticated crawling
             root = finding.path

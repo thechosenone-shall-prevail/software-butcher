@@ -20,6 +20,7 @@ from software_butcher.core.runner import SafeRunner
 from software_butcher.core.recon_seed import ensure_host_recon_hypothesis, next_recon_hypothesis
 from software_butcher.core.scope import Scope
 from software_butcher.core.url_utils import base_web_url, host_key
+from software_butcher.core.path_relevance import is_noise_path, score_path
 from software_butcher.state.recon_checklist import HOST_LEVEL_RECON_CAPABILITIES, mark_host_recon
 from software_butcher.shelves.hexstrike.client import HexstrikeServerUnavailableError
 from software_butcher.state.path_graph import parent_path as compute_parent_path
@@ -158,6 +159,50 @@ def _apply_recon_gate(
         reason=f"Recon checklist incomplete for {host}; run {missing} before {chosen or 'exploit scanning'}.",
         options={"capability": missing},
     )
+
+
+def _apply_path_relevance_gate(
+    store: FindingStore,
+    hypothesis,
+    decision: PolicyDecision,
+) -> PolicyDecision:
+    """Stop remapping XAMPP boilerplate paths; prefer discovery when stack mismatch exists."""
+    if decision.asset.asset_type not in {"web_endpoint", "api", "domain"}:
+        return decision
+
+    capability = str((decision.options or {}).get("capability") or decision.intent or "")
+    if capability != "http_surface_map":
+        return decision
+
+    host = host_key(hypothesis.path)
+    if not store.recon_checklist.is_complete(host):
+        return decision
+
+    if is_noise_path(hypothesis.path):
+        sys.stderr.write(
+            f"[Brain] Skipping surface remap of noise path {hypothesis.path} — marking complete.\n"
+        )
+        return PolicyDecision(
+            intent="continue_discovery",
+            asset=decision.asset,
+            preferred_adapter="hexstrike",
+            reason=f"Path {hypothesis.path} is stack boilerplate (XAMPP/docs); not worth remapping.",
+            options={"capability": "continue_discovery", "skip_execute": True},
+        )
+
+    path_score = score_path(hypothesis.path)
+    if path_score < 0.35 and hypothesis.path.rstrip("/") != base_web_url(store.base_target or hypothesis.path).rstrip("/"):
+        sys.stderr.write(
+            f"[Brain] Low-relevance path {hypothesis.path} (score={path_score:.2f}) — prefer directory discovery.\n"
+        )
+        return PolicyDecision(
+            intent="directory_bruteforce",
+            asset=Asset(locator=base_web_url(store.base_target or hypothesis.path), asset_type=decision.asset.asset_type),
+            preferred_adapter="hexstrike",
+            reason="Low-relevance child path; host recon done — use directory discovery for unlinked apps.",
+            options={"capability": "directory_bruteforce"},
+        )
+    return decision
 
 
 def _findings_from_adapter_result(
@@ -354,21 +399,23 @@ def run_brain_once(
             content = llm_response.choices[0].message.content
             llm_decision = json.loads(content) if content else {}
             capability = llm_decision.get("capability")
-            sys.stderr.write(f"[Brain] LLM chose capability: {capability} (Reasoning: {llm_decision.get('reasoning')})\n")
-            
-            # Find the adapter that owns this capability
-            adapter = registry.find_by_capability(capability or "")
-            if not adapter:
-                sys.stderr.write(f"[Brain] Capability '{capability}' not found in registry. Falling back to hexstrike.\n")
-                adapter = registry.get("hexstrike")
-                
-            decision = PolicyDecision(
-                intent=capability or explicit_intent or "discover",
-                asset=asset_for_policy,
-                preferred_adapter=adapter.name if adapter else "hexstrike",
-                reason=llm_decision.get("reasoning", "LLM reasoning"),
-                options={"capability": capability} if capability else {},
-            )
+            if capability in (None, "None", "null", ""):
+                capability = None
+                decision = None
+            else:
+                sys.stderr.write(f"[Brain] LLM chose capability: {capability} (Reasoning: {llm_decision.get('reasoning')})\n")
+                adapter = registry.find_by_capability(capability or "")
+                if not adapter:
+                    sys.stderr.write(f"[Brain] Capability '{capability}' not found in registry. Falling back to policy.\n")
+                    decision = None
+                else:
+                    decision = PolicyDecision(
+                        intent=capability or explicit_intent or "discover",
+                        asset=asset_for_policy,
+                        preferred_adapter=adapter.name if adapter else "hexstrike",
+                        reason=llm_decision.get("reasoning", "LLM reasoning"),
+                        options={"capability": capability} if capability else {},
+                    )
         except Exception as exc:
             # LLM failure should never crash the Brain loop — fall through
             # to deterministic policy
@@ -396,8 +443,25 @@ def run_brain_once(
         decision = policy.decide(asset_for_policy, list(store.findings.values()))
 
     decision = _apply_recon_gate(store, hypothesis, decision, explicit_intent)
+    decision = _apply_path_relevance_gate(store, hypothesis, decision)
 
     route = _route_for_decision(decision, router)
+
+    if (decision.options or {}).get("skip_execute"):
+        skipped = Finding(
+            hypothesis=hypothesis.reason,
+            path=hypothesis.path,
+            provenance="brain:noise_skip",
+            status="dismissed",
+            evidence=[decision.reason],
+            confidence=0.2,
+            parent_path=parent_path_value,
+            asset_type=decision.asset.asset_type,
+        )
+        _ingest_finding(store, skipped, branch_id, on_finding_ingested)
+        store.queue.complete(hypothesis.id)
+        store.save_or_log()
+        return skipped
 
     tool_limit = scope.max_tool_calls if scope else 50
     if not store.can_run_tool(tool_limit):

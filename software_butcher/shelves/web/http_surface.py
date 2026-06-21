@@ -6,6 +6,12 @@ import re
 import urllib.parse
 from typing import Any
 
+from software_butcher.core.path_relevance import (
+    detect_default_stack_landing,
+    score_path,
+    should_queue_path,
+    summarize_page_content,
+)
 from software_butcher.core.adapter import AdapterCapability, AdapterRequest, AdapterResult
 from software_butcher.core.url_utils import base_web_url, host_key, same_origin
 from software_butcher.shelves.hexstrike.interpreter import HexStrikeInterpreter
@@ -230,6 +236,21 @@ def map_http_surface(
             discovered.append(final)
 
     title = extract_title(html) or browser_result.title
+    page_summary = summarize_page_content(title, html)
+    stack_landing = detect_default_stack_landing(
+        title=title,
+        body=html,
+        headers=headers,
+        final_url=curl_final,
+    )
+
+    scored_urls: list[dict[str, Any]] = []
+    prioritized: list[str] = []
+    for link in discovered:
+        sc = score_path(link, title=title, page_context=page_summary)
+        scored_urls.append({"url": link, "score": sc})
+        if should_queue_path(link, title=title, page_context=page_summary):
+            prioritized.append(link)
 
     return {
         "target": base,
@@ -248,7 +269,11 @@ def map_http_surface(
         "infrastructure": infrastructure.to_dict(),
         "cache_probe": cache_probe,
         "title": title,
-        "discovered_urls": discovered,
+        "page_summary": page_summary,
+        "stack_landing": stack_landing,
+        "discovered_urls": prioritized,
+        "all_discovered_urls": discovered,
+        "scored_urls": scored_urls,
         "error": browser_get.error or head.error or browser_result.error,
         "success": browser_get.status_code is not None or bool(head.status_code) or browser_result.success,
         "transport": {
@@ -363,6 +388,13 @@ class HttpSurfaceAdapter:
         for conclusion in infra.get("conclusions") or []:
             evidence.append(f"conclusion={conclusion}")
 
+        stack_landing = surface.get("stack_landing") or {}
+        if stack_landing.get("detected"):
+            evidence.append(f"stack_landing={stack_landing.get('stack')}")
+            evidence.append(f"conclusion={stack_landing.get('conclusion')}")
+        if surface.get("page_summary"):
+            evidence.append(f"page_summary={surface['page_summary'][:200]}")
+
         rate_limit = infra.get("rate_limit")
         metadata: dict[str, Any] = {
             "capability": "http_surface_map",
@@ -378,16 +410,23 @@ class HttpSurfaceAdapter:
             "browser_final_url": surface.get("browser_final_url"),
             "cache_probe": surface.get("cache_probe"),
             "transport": surface.get("transport"),
+            "page_summary": surface.get("page_summary"),
+            "stack_landing": stack_landing,
+            "scored_urls": surface.get("scored_urls"),
+            "all_discovered_urls": surface.get("all_discovered_urls"),
         }
         if rate_limit and rate_limit.get("detected"):
             metadata["rate_limited"] = True
             metadata["transport_action"] = rate_limit.get("recommended_action")
 
+        prioritized_links = surface.get("discovered_urls") or []
+        all_links = surface.get("all_discovered_urls") or []
         primary = {
             "hypothesis": (
                 f"HTTP surface mapped for {surface.get('target')}: "
-                f"{len(headers)} headers, {len(surface.get('discovered_urls') or [])} links, "
-                f"WAF={', '.join(infra.get('waf') or []) or 'none'}."
+                f"title={surface.get('title') or 'unknown'}; "
+                f"{(surface.get('page_summary') or '')[:120]}; "
+                f"{len(prioritized_links)} prioritized links (of {len(all_links)} total)."
             ),
             "path": surface.get("target") or surface.get("final_url"),
             "provenance": "http_surface:map",
@@ -426,18 +465,24 @@ class HttpSurfaceAdapter:
             )
 
         for link in surface.get("discovered_urls") or []:
+            link_score = score_path(link, title=surface.get("title") or "", page_context=surface.get("page_summary") or "")
             findings.append(
                 {
-                    "hypothesis": f"Link discovered during HTTP surface map: {link}",
+                    "hypothesis": f"High-value path from surface map (score={link_score:.2f}): {link}",
                     "path": link,
                     "provenance": "http_surface:link",
                     "status": "hypothesis",
-                    "confidence": 0.5,
-                    "evidence": [f"discovered_from={surface.get('target')}", f"url={link}"],
+                    "confidence": 0.45 + link_score * 0.4,
+                    "evidence": [
+                        f"discovered_from={surface.get('target')}",
+                        f"url={link}",
+                        f"relevance_score={link_score:.2f}",
+                    ],
                     "asset_type": "web_endpoint",
                     "metadata": {
                         "capability": "http_surface_map",
                         "discovered_from": surface.get("target"),
+                        "relevance_score": link_score,
                     },
                 }
             )

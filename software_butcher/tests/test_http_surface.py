@@ -122,8 +122,8 @@ def test_map_http_surface_includes_redirect_chain_urls(mock_cache, mock_follow, 
     surface = map_http_surface("http://example.com", use_browser=False)
     assert surface["final_url"] == "http://example.com/dashboard/"
     assert len(surface["get_chain"]) == 2
-    assert "http://example.com/dashboard" in surface["discovered_urls"]
     assert "http://example.com/faq.html" in surface["discovered_urls"]
+    assert "http://example.com/dashboard" in surface.get("all_discovered_urls", [])
 
 
 @patch("software_butcher.shelves.web.http_surface.browser_navigate")
