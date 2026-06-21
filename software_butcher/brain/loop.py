@@ -18,7 +18,11 @@ from software_butcher.core.assets import Asset
 from software_butcher.core.registry import DEFAULT_REGISTRY, AdapterRegistry, Registry, default_registry
 from software_butcher.core.router import AssetRouter, RouteDecision
 from software_butcher.synthesis.report import Synthesizer
-from software_butcher.core.app_root import should_defer_out_of_app_hypothesis
+from software_butcher.core.app_root import (
+    app_subtree_analysis_incomplete,
+    infer_application_root,
+    should_defer_out_of_app_hypothesis,
+)
 from software_butcher.core.recon_seed import ensure_host_recon_hypothesis, next_recon_hypothesis
 from software_butcher.core.scope import Scope
 from software_butcher.core.url_utils import base_web_url, engagement_entry_url, host_key
@@ -1320,6 +1324,7 @@ def run_brain_once(
                 store.add_hypotheses(generated)
 
     store.queue.complete(hypothesis.id)
+    store.recompute_state()
     store.save_or_log()
 
     return primary_finding
@@ -1483,6 +1488,14 @@ class BrainLoop:
             events.extend(wave_events)
 
             if all(event.get("status") == "idle" for event in wave_events):
+                app_root = self.store.application_root()
+                if (
+                    app_root is not None
+                    and app_subtree_analysis_incomplete(list(self.store.findings.values()), app_root)
+                ):
+                    self.store.recompute_state()
+                    if self.store.queue.pending_list():
+                        continue
                 recon_host = host_key((asset.locator if asset else "") or self.store.base_target)
                 if recon_host and not self.store.recon_complete_for(recon_host):
                     if ensure_host_recon_hypothesis(self.store):

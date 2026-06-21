@@ -230,6 +230,8 @@ def _content_mapped_urls(findings: Iterable[Finding], app_root: ApplicationRoot)
                 continue
             if page.get("conclusions") or page.get("form_count") is not None or page.get("page_type"):
                 mapped.add(_normalize(url))
+            elif page.get("content_analysis"):
+                mapped.add(_normalize(url))
         path = finding.path
         if url_under_application_root(path, app_root) and meta.get("content_analysis"):
             mapped.add(_normalize(path))
@@ -239,10 +241,54 @@ def _content_mapped_urls(findings: Iterable[Finding], app_root: ApplicationRoot)
     return mapped
 
 
+def _application_work_urls(
+    findings: Iterable[Finding],
+    app_root: ApplicationRoot,
+    *,
+    base_target: str = "",
+) -> set[str]:
+    """All app-subtree URLs that should receive map/audit work."""
+    urls = _discovered_app_urls(findings, app_root)
+    urls.add(_normalize(app_root.url))
+    entry = engagement_entry_url(base_target).rstrip("/") if base_target else ""
+    if entry:
+        urls.add(_normalize(entry))
+    return urls
+
+
+def _resolve_work_url(
+    url_norm: str,
+    findings: Iterable[Finding],
+    app_root: ApplicationRoot,
+    *,
+    base_target: str = "",
+) -> str:
+    for finding in findings:
+        meta = finding.metadata or {}
+        for candidate in (
+            finding.path,
+            str(meta.get("mapped_target") or ""),
+            *(str(page.get("url") or "") for page in meta.get("content_pages") or []),
+            *(str(url) for url in as_dict(meta.get("app_expand")).get("expanded_urls") or []),
+            *(str(url) for url in meta.get("discovered_urls") or []),
+        ):
+            if candidate and _normalize(candidate) == url_norm:
+                return candidate
+    if _normalize(app_root.url) == url_norm:
+        return app_root.url
+    entry = engagement_entry_url(base_target).rstrip("/") if base_target else ""
+    if entry and _normalize(entry) == url_norm:
+        return entry
+    return url_norm
+
+
 def _discovered_app_urls(findings: Iterable[Finding], app_root: ApplicationRoot) -> set[str]:
     discovered: set[str] = set()
     for finding in findings:
         meta = finding.metadata or {}
+        mapped_target = str(meta.get("mapped_target") or "")
+        if mapped_target and url_under_application_root(mapped_target, app_root):
+            discovered.add(_normalize(mapped_target))
         for page in meta.get("content_pages") or []:
             url = str(page.get("url") or "")
             if url_under_application_root(url, app_root):
@@ -570,11 +616,14 @@ def app_subtree_analysis_incomplete(
     if pending_maps or pending_redirects:
         return True
 
-    discovered = _discovered_app_urls(findings_list, app_root)
-    if not discovered:
-        return True
+    work_urls = _discovered_app_urls(findings_list, app_root)
+    if not work_urls:
+        work_urls = {_normalize(app_root.url)}
 
-    for url_norm in discovered:
+    mapped = _content_mapped_urls(findings_list, app_root)
+    for url_norm in work_urls:
+        if url_norm not in mapped:
+            return True
         if not _capability_observed_on_url(findings_list, url_norm, "security_posture_audit"):
             return True
 
@@ -649,26 +698,28 @@ def ensure_app_subtree_hypotheses(
 
     source_id = _best_app_source_finding_id(findings, app_root)
     queued: list[Hypothesis] = []
+    mapped = _content_mapped_urls(findings_list, app_root)
+    pending_map_norms = {_normalize(url) for url in app_root_pending_urls(findings_list, app_root)}
 
-    for url in app_root_pending_urls(findings_list, app_root):
-        queued.append(
-            Hypothesis(
-                path=url,
-                reason="Organic app link discovered — map content, forms, and redirect behavior.",
-                source_finding_id=source_id,
-                priority=0.93,
-                metadata={
-                    "intent": "http_surface_map",
-                    "asset_type": "web_endpoint",
-                    "generated_by": "app_link_expand",
-                    "organically_discovered": True,
-                },
+    for url_norm in sorted(_application_work_urls(findings_list, app_root, base_target=base_target)):
+        url = _resolve_work_url(url_norm, findings_list, app_root, base_target=base_target)
+        if url_norm not in mapped or url_norm in pending_map_norms:
+            queued.append(
+                Hypothesis(
+                    path=url,
+                    reason="Application subtree page needs content map before deeper analysis.",
+                    source_finding_id=source_id,
+                    priority=0.93 if url_norm in pending_map_norms else 0.88,
+                    metadata={
+                        "intent": "http_surface_map",
+                        "asset_type": "web_endpoint",
+                        "generated_by": "app_link_expand",
+                        "organically_discovered": True,
+                    },
+                )
             )
-        )
-
-    for url, page in _iter_app_pages_with_data(findings_list, app_root):
-        if not _page_content_mapped(page):
             continue
+
         if not _capability_observed_on_url(findings_list, url, "security_posture_audit"):
             queued.append(
                 Hypothesis(
@@ -685,7 +736,9 @@ def ensure_app_subtree_hypotheses(
                     },
                 )
             )
-        if _page_redirect_leak_suspected(page) and not _capability_observed_on_url(
+
+        page_meta = _page_meta_for_url(findings_list, app_root, url_norm)
+        if page_meta and _page_redirect_leak_suspected(page_meta) and not _capability_observed_on_url(
             findings_list, url, "redirect_body_audit"
         ):
             queued.append(
@@ -707,7 +760,8 @@ def ensure_app_subtree_hypotheses(
                 )
             )
         elif (
-            any(int(entry.get("status") or 0) in {301, 302} for entry in as_dict_list(page.get("redirect_observations")))
+            page_meta
+            and any(int(entry.get("status") or 0) in {301, 302} for entry in as_dict_list(page_meta.get("redirect_observations")))
             and url.lower().endswith(".php")
             and not _capability_observed_on_url(findings_list, url, "redirect_body_audit")
         ):
@@ -728,6 +782,17 @@ def ensure_app_subtree_hypotheses(
             )
 
     return queued
+
+
+def _page_meta_for_url(
+    findings: Iterable[Finding],
+    app_root: ApplicationRoot,
+    url_norm: str,
+) -> dict | None:
+    for url, page in _iter_app_pages_with_data(findings, app_root):
+        if _normalize(url) == url_norm:
+            return page
+    return None
 
 
 def should_defer_out_of_app_hypothesis(

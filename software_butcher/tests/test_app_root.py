@@ -386,6 +386,53 @@ def test_app_subtree_incomplete_when_no_discovered_app_pages():
     assert app_subtree_analysis_incomplete([finding], app_root) is True
 
 
+def test_ensure_queues_posture_after_lone_hall_surface_map():
+    from software_butcher.core.app_root import ensure_app_subtree_hypotheses
+
+    finding = Finding(
+        hypothesis="surface map",
+        path="http://example.edu/hall/",
+        provenance="http_surface:map",
+        metadata={
+            "capability": "http_surface_map",
+            "content_analysis": True,
+            "mapped_target": "http://example.edu/hall/",
+        },
+    )
+    app_root = infer_application_root([finding], base_target="http://example.edu/hall/")
+    assert app_root is not None
+    hyps = ensure_app_subtree_hypotheses(
+        {finding.id: finding},
+        app_root,
+        base_target="http://example.edu/hall/",
+        engagement_type="assessment",
+    )
+    intents = {(h.metadata or {}).get("intent") for h in hyps}
+    assert "security_posture_audit" in intents
+
+
+def test_store_queues_followups_after_minimal_hall_map(tmp_path):
+    from software_butcher.core.scope import Scope
+    from software_butcher.state.store import FindingStore
+
+    store = FindingStore(tmp_path / "state.json")
+    scope = Scope(name="t", allowed_domains=["example.edu"], metadata={"engagement_type": "assessment"})
+    store.set_base_target("http://example.edu/hall/")
+    store.set_engagement_from_scope(scope)
+    finding = Finding(
+        hypothesis="surface map",
+        path="http://example.edu/hall/",
+        provenance="http_surface:map",
+        metadata={
+            "capability": "http_surface_map",
+            "content_analysis": True,
+            "mapped_target": "http://example.edu/hall/",
+        },
+    )
+    store.ingest_finding(finding)
+    assert store.queue.next() is not None
+
+
 def test_queue_next_prefers_hall_over_phpinfo_when_analysis_incomplete():
     """Regression: stale infra in queue must not win when /hall app work remains."""
     finding = _surface_finding(
