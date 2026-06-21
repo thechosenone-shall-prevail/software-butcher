@@ -1,32 +1,40 @@
-"""Tests for hostname-derived semantic path discovery."""
+"""Tests for hostname + engagement_context path hints (no fixed wordlists)."""
 
 from software_butcher.core.domain_semantics import semantic_path_candidates, tokens_from_host
 
 
-def test_hallbooking_host_yields_hall_token():
+def test_hallbooking_without_context_only_yields_hostname_label():
     tokens = tokens_from_host("http://hallbooking.srmrmp.edu.in")
+    assert tokens == ["hallbooking"]
+
+
+def test_hallbooking_with_context_extracts_embedded_words():
+    ctx = "faculty hall booking registration portal PHP MySQL"
+    tokens = tokens_from_host("http://hallbooking.srmrmp.edu.in", ctx)
     assert "hallbooking" in tokens
     assert "hall" in tokens
-    assert "booking" not in tokens
-    assert "book" not in tokens
+    assert "booking" in tokens
 
 
-def test_semantic_candidates_cap_substring_spray():
+def test_semantic_candidates_without_context_use_hostname_only():
     cands = semantic_path_candidates("http://hallbooking.srmrmp.edu.in")
     urls = [c["url"] for c in cands]
     assert len(cands) <= 2
     assert "http://hallbooking.srmrmp.edu.in/hallbooking" in urls
+    assert "http://hallbooking.srmrmp.edu.in/hall" not in urls
     assert "http://hallbooking.srmrmp.edu.in/book" not in urls
-    assert "http://hallbooking.srmrmp.edu.in/booking" not in urls
     assert "http://hallbooking.srmrmp.edu.in/dashboard" not in urls
 
 
-def test_semantic_candidates_include_hall_path():
-    cands = semantic_path_candidates("http://hallbooking.srmrmp.edu.in")
-    urls = [c["url"] for c in cands]
-    assert "http://hallbooking.srmrmp.edu.in/hall" in urls
-    hall = next(c for c in cands if c["token"] == "hall")
-    assert float(hall["score"]) >= 0.9
+def test_semantic_candidates_with_context_can_include_embedded_tokens():
+    ctx = "faculty hall booking registration"
+    cands = semantic_path_candidates(
+        "http://hallbooking.srmrmp.edu.in",
+        engagement_context=ctx,
+        max_paths=4,
+    )
+    tokens = {c["token"] for c in cands}
+    assert "hall" in tokens or "booking" in tokens
 
 
 def test_engagement_context_adds_tokens():

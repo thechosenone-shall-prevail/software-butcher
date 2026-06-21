@@ -58,7 +58,7 @@ Capability selection rules:
 
 2. After root surface map, read page_summary, content conclusions, and stack_landing — do NOT http_surface_map every child link.
 
-3. If stack_landing indicates default hosting, run at most 1–2 overlap-ranked semantic probes — never spray hostname substrings.
+3. If stack_landing indicates default hosting, follow organic links (robots, sitemap, HTML anchors, redirects) — never guess hostname substrings or run wordlist sprays.
 
 4. Prefer http_surface_map (local) over web_behavior_analysis (HexStrike) until application content is read.
 

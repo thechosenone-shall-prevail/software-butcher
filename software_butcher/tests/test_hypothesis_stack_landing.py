@@ -24,14 +24,14 @@ def test_stack_landing_generates_semantic_hypotheses_not_scanners():
     )
     hyps = HypothesisGenerator().generate(finding)
     intents = {h.metadata.get("generated_by") for h in hyps}
-    assert "domain_semantics" in intents
+    assert "domain_semantics" not in intents
     assert "content_intel" in intents
     assert "search_index_osint" not in intents
     assert "stack_mismatch" not in intents
     assert not any(h.metadata.get("intent") == "directory_bruteforce" for h in hyps)
     assert not any(h.metadata.get("intent") == "bugbounty_osint" for h in hyps)
     semantic = [h for h in hyps if h.metadata.get("generated_by") == "domain_semantics"]
-    assert len(semantic) <= 2
+    assert len(semantic) == 0
 
 
 def test_queue_rejects_unlinked_flag_paths():

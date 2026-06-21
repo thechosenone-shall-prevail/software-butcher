@@ -26,7 +26,7 @@ THEME_SIGNALS: list[tuple[str, tuple[str, ...]]] = [
     ("flag_root", ("root flag", "root.txt", "proof.txt")),
 ]
 
-WEB_AUTH_PATH_SIGNALS = ("login", "admin", "auth", "dashboard", "portal", "hall", "signin", "session")
+WEB_AUTH_PATH_SIGNALS = ("login", "admin", "auth", "dashboard", "portal", "signin", "session")
 
 
 def _finding_text(finding: Finding) -> str:

@@ -6,7 +6,7 @@ import re
 import urllib.parse
 from typing import Any
 
-from software_butcher.core.domain_semantics import semantic_path_candidates
+from software_butcher.core.app_root import infer_application_root_from_surface_map
 from software_butcher.core.path_relevance import (
     detect_default_stack_landing,
     score_path,
@@ -307,41 +307,7 @@ def map_http_surface(
         final_url=curl_final,
     )
 
-    semantic_probes: list[dict[str, Any]] = []
-    meta = (scope or {}).get("metadata") if isinstance((scope or {}).get("metadata"), dict) else {}
-    engagement_context = str(meta.get("engagement_context") or "")
-
-    if stack_landing.get("detected"):
-        for cand in semantic_path_candidates(base, engagement_context=engagement_context, max_paths=2):
-            probe_url = str(cand["url"])
-            if probe_url.rstrip("/").lower() in seen:
-                continue
-            probe = transport.follow_redirects(probe_url, "GET", profile="browser", host=host)
-            probe_title = extract_title(probe.body)
-            content = analyze_page_content(
-                probe_url,
-                headers=probe.headers,
-                body=probe.body,
-                title=probe_title,
-                nvd_api_key=nvd_api_key,
-            )
-            semantic_probes.append(
-                {
-                    "url": probe_url,
-                    "token": cand["token"],
-                    "status_code": probe.status_code,
-                    "title": probe_title,
-                    "score": cand["score"],
-                    "rationale": cand["rationale"],
-                    "reachable": probe.status_code is not None and probe.status_code < 400,
-                    "content_analysis": content,
-                }
-            )
-            if probe.status_code is not None and probe.status_code < 400:
-                normalized = probe_url.rstrip("/")
-                if normalized not in seen:
-                    seen.add(normalized)
-                    discovered.append(normalized)
+    scope_meta = (scope or {}).get("metadata") if isinstance((scope or {}).get("metadata"), dict) else {}
 
     content_pages: list[dict[str, Any]] = []
     root_content = analyze_page_content(
@@ -358,20 +324,13 @@ def map_http_surface(
             transport, base, host, discovered, content_pages, seen, nvd_api_key=nvd_api_key
         )
 
-    for probe in semantic_probes:
-        if probe.get("content_analysis"):
-            content_pages.append(probe["content_analysis"])
-
-    # Organic app expansion from entry pages (forms, reachable semantic probes).
-    expand_cfg = meta.get("app_expand") if isinstance(meta.get("app_expand"), dict) else {}
+    # Organic app expansion from entry pages with forms (links/redirects only).
+    expand_cfg = scope_meta.get("app_expand") if isinstance(scope_meta.get("app_expand"), dict) else {}
     max_expand_pages = int(expand_cfg.get("max_pages") or 15)
     max_expand_depth = int(expand_cfg.get("max_depth") or 2)
     entry_urls: list[str] = []
     if curl_final and not stack_landing.get("detected"):
         entry_urls.append(curl_final)
-    for probe in semantic_probes:
-        if probe.get("reachable") and probe.get("url"):
-            entry_urls.append(str(probe["url"]))
     for page in content_pages:
         if int(page.get("form_count") or 0) > 0 and page.get("url"):
             entry_urls.append(str(page["url"]))
@@ -412,7 +371,7 @@ def map_http_surface(
         if should_queue_path(link, title=title, page_context=page_summary, organically_discovered=True):
             prioritized.append(link)
 
-    return {
+    surface = {
         "target": base,
         "final_url": curl_final,
         "browser_final_url": browser_result.final_url if browser_result.success else None,
@@ -433,7 +392,6 @@ def map_http_surface(
         "title": title,
         "page_summary": page_summary,
         "stack_landing": stack_landing,
-        "semantic_probes": semantic_probes,
         "content_pages": content_pages,
         "app_expand": app_expand_result,
         "discovered_urls": prioritized,
@@ -447,6 +405,14 @@ def map_http_surface(
             "egress_rotations": ts.host(host).egress_rotations,
         },
     }
+    return _attach_application_root(surface, url)
+
+
+def _attach_application_root(surface: dict[str, Any], base_target: str) -> dict[str, Any]:
+    app_root = infer_application_root_from_surface_map(surface, base_target=base_target)
+    if app_root is not None:
+        surface["application_root"] = app_root.to_dict()
+    return surface
 
 
 # Backward-compatible test hook
@@ -603,11 +569,14 @@ class HttpSurfaceAdapter:
             "stack_landing": stack_landing,
             "semantic_probes": surface.get("semantic_probes"),
             "content_pages": surface.get("content_pages"),
+            "app_expand": surface.get("app_expand"),
             "scored_urls": surface.get("scored_urls"),
             "all_discovered_urls": surface.get("all_discovered_urls"),
             "redirect_observations": surface.get("redirect_observations"),
             "redirect_body_leak_suspected": surface.get("redirect_body_leak_suspected"),
         }
+        if surface.get("application_root"):
+            metadata["application_root"] = surface["application_root"]
         if rate_limit and rate_limit.get("detected"):
             metadata["rate_limited"] = True
             metadata["transport_action"] = rate_limit.get("recommended_action")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from software_butcher.core.app_root import infer_application_root
 from software_butcher.state.convergence import recompute_clusters
 from software_butcher.state.schema import ConvergenceCluster, Finding
 from software_butcher.state.engagement import EngagementState
@@ -15,18 +16,27 @@ def build_brain_context(
     session_store: SessionStore | None = None,
     limit: int = 40,
     engagement_type: str | None = None,
+    base_target: str = "",
 ) -> str:
     """Build a structured state summary for LLM capability selection."""
     clusters = clusters or recompute_clusters(findings)
     sorted_findings = sorted(findings, key=lambda f: f.created_at)[-limit:]
     et = engagement_type or getattr(engagement, "engagement_type", None) or "assessment"
 
+    app_root = infer_application_root(findings, base_target)
     lines = [
         f"Engagement mode: {et}",
         f"Engagement phase: {engagement.phase}",
         f"Flags: user={engagement.user_flag or 'none'} root={engagement.root_flag or 'none'}",
         "",
     ]
+    if app_root is not None:
+        lines.extend([
+            f"Application root (inferred): {app_root.url} (confidence={app_root.confidence:.2f})",
+            f"  Rationale: {app_root.rationale}",
+            "  Scope subsequent work to this directory subtree; parallel stack paths (phpMyAdmin, phpinfo) remain valid.",
+            "",
+        ])
 
     # Add shell session information if available
     if session_store and session_store.shell_sessions.sessions:

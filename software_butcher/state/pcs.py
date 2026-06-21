@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from software_butcher.core.app_root import ApplicationRoot, finding_drives_pcs_branching
 from software_butcher.state.schema import ConvergenceCluster, Finding
 
 
@@ -66,6 +67,8 @@ class ProgressiveConvergenceSearch:
         new_findings: list[Finding],
         *,
         recon_complete: bool = True,
+        app_root: ApplicationRoot | None = None,
+        engagement_type: str = "assessment",
     ) -> tuple[int, str]:
         """Return (branch_count, reason) for the next Brain step."""
         if self.state.validation_mode:
@@ -100,7 +103,11 @@ class ProgressiveConvergenceSearch:
             self.state.active_branches = 1
             return 1, f"convergence_stop: score {max_conv:.2f} >= {CONVERGENCE_STOP_THRESHOLD}"
 
-        if self._high_value_evidence(new_findings):
+        if self._high_value_evidence(
+            new_findings,
+            app_root=app_root,
+            engagement_type=engagement_type,
+        ):
             self.state.active_branches = min(MAX_BRANCHES, SPAWN_ON_EVIDENCE)
             self.state.total_spawned = max(self.state.total_spawned, self.state.active_branches)
             return self.state.active_branches, "evidence_triggered: high-value finding spawned branches"
@@ -116,10 +123,21 @@ class ProgressiveConvergenceSearch:
         return INITIAL_BRANCHES, "primary_path: no branch trigger"
 
     @staticmethod
-    def _high_value_evidence(findings: list[Finding]) -> bool:
+    def _high_value_evidence(
+        findings: list[Finding],
+        *,
+        app_root: ApplicationRoot | None = None,
+        engagement_type: str = "assessment",
+    ) -> bool:
         if not findings:
             return False
         for finding in findings:
+            if not finding_drives_pcs_branching(
+                finding,
+                app_root,
+                engagement_type=engagement_type,
+            ):
+                continue
             if finding.status == "confirmed":
                 return True
             if finding.confidence >= HIGH_VALUE_CONFIDENCE:

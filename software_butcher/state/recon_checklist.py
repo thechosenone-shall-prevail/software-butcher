@@ -11,7 +11,7 @@ from software_butcher.state.schema import Finding
 
 REQUIRED_RECON_CAPABILITIES: tuple[str, ...] = ("http_surface_map",)
 
-HOST_LEVEL_RECON_CAPABILITIES = frozenset({*REQUIRED_RECON_CAPABILITIES, "directory_bruteforce"})
+HOST_LEVEL_RECON_CAPABILITIES = frozenset(REQUIRED_RECON_CAPABILITIES)
 
 EXPLOIT_SCAN_CAPABILITIES = frozenset(
     {
@@ -78,8 +78,6 @@ def mark_host_recon(checklist: ReconChecklist, base_target: str, capability: str
     if capability not in HOST_LEVEL_RECON_CAPABILITIES:
         return
     checklist.mark(host_key(base_target), capability)
-    if capability == "directory_bruteforce":
-        checklist.mark(host_key(base_target), "endpoint_discovery")
 
 
 def record_recon_progress(
@@ -100,10 +98,8 @@ def record_recon_progress(
         if finding_path != entry and mapped_target != entry:
             return
 
-    if capability in REQUIRED_RECON_CAPABILITIES or capability == "directory_bruteforce":
+    if capability in REQUIRED_RECON_CAPABILITIES:
         checklist.mark(host, capability)
-        if capability == "directory_bruteforce":
-            checklist.mark(host, "endpoint_discovery")
 
 
 def recon_allows_capability(checklist: ReconChecklist, host: str, capability: str) -> bool:

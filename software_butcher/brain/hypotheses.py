@@ -8,7 +8,6 @@ tool categories on the HexStrike server.
 from __future__ import annotations
 
 from software_butcher.core.asset_classifier import is_static_asset
-from software_butcher.core.domain_semantics import semantic_path_candidates
 from software_butcher.core.path_relevance import is_noise_path, score_path
 from software_butcher.state.engagement import normalize_engagement_type
 from software_butcher.core.url_utils import base_web_url
@@ -329,7 +328,11 @@ class HypothesisGenerator:
                             },
                         )
                     )
-                elif score_path(url) >= 0.85:
+                elif score_path(
+                    url,
+                    page_context=" ".join(conclusions),
+                    organically_discovered=True,
+                ) >= 0.85:
                     generated.append(
                         Hypothesis(
                             path=url,
@@ -366,31 +369,6 @@ class HypothesisGenerator:
                         )
                     )
 
-            for cand in semantic_path_candidates(
-                base,
-                engagement_context=ctx,
-                max_paths=2,
-                mapped_urls=analyzed_urls,
-            ):
-                url = str(cand["url"])
-                if url.rstrip("/").lower() in analyzed_urls:
-                    continue
-                if score_path(url) < 0.5:
-                    continue
-                generated.append(
-                    Hypothesis(
-                        path=url,
-                        reason=cand["rationale"],
-                        source_finding_id=finding.id,
-                        priority=float(cand["score"]),
-                        metadata={
-                            "intent": "http_surface_map",
-                            "asset_type": "web_endpoint",
-                            "generated_by": "domain_semantics",
-                            "semantic_token": cand["token"],
-                        },
-                    )
-                )
             if finding.metadata.get("browser_final_url"):
                 bf = str(finding.metadata["browser_final_url"])
                 if score_path(bf) >= 0.5 and not is_noise_path(bf):

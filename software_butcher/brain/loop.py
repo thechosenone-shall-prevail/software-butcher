@@ -292,7 +292,6 @@ _DIRECTED_GENERATORS: frozenset[str] = frozenset({
     "broken_access",
     "pii_exposure",
     "mysql_resource_intel",
-    "domain_semantics",
     "browser_divergence",
     "stack_cve_intel",
     "auth_escalation",
@@ -619,7 +618,7 @@ def _apply_local_analysis_gate(
             options={"capability": "http_surface_map"},
         )
 
-    if meta.get("generated_by") in {"content_intel", "mysql_resource_intel", "domain_semantics"}:
+    if meta.get("generated_by") in {"content_intel", "mysql_resource_intel"}:
         return PolicyDecision(
             intent="http_surface_map",
             asset=decision.asset,
@@ -1057,6 +1056,7 @@ def run_brain_once(
             store.clusters,
             store.session_store,
             engagement_type=engagement_type,
+            base_target=store.base_target,
         )
         phase = store.engagement.phase
         pcs_mode = "validation" if store.pcs.state.validation_mode else "exploration"
@@ -1419,6 +1419,8 @@ class BrainLoop:
                     self.store.clusters,
                     wave_new_findings,
                     recon_complete=recon_ok,
+                    app_root=self.store.application_root(),
+                    engagement_type=getattr(self.store, "_engagement_type", "assessment"),
                 )
                 branch_count = min(branch_count, self.max_branches)
                 if not recon_ok or not content_ok:

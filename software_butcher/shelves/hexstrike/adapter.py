@@ -284,8 +284,7 @@ class HexstrikeAdapter:
         Returns None for capabilities that should use the legacy discovery flow
         (web_behavior_analysis, authenticated_discovery).
 
-        endpoint_discovery runs gobuster directly so unlinked paths like /hall
-        are found even when analyze_target returns nothing useful.
+        endpoint_discovery runs katana link crawl only — no gobuster/ffuf wordlists.
         """
         # web_behavior_analysis and authenticated_discovery use the existing
         # discovery flow (HTML crawl + analyze_target).
@@ -299,19 +298,20 @@ class HexstrikeAdapter:
                 return self.client.run_api_fuzzer(target, **safe_opts)
             except Exception as exc:
                 return {"error": str(exc), "success": False}
-        # endpoint_discovery runs a multi-tool bundle so paths like /hall are not missed.
         if capability == "endpoint_discovery":
-            bundle: dict[str, Any] = {}
-            for tool_name, runner in (
-                ("gobuster", lambda: self.client.run_gobuster(target)),
-                ("ffuf", lambda: self.client.run_ffuf(target)),
-                ("katana", lambda: self.client.run_katana(target)),
-            ):
-                try:
-                    bundle[tool_name] = runner()
-                except Exception as exc:
-                    bundle[tool_name] = {"error": str(exc), "success": False}
-            return {"success": True, "bundle": "endpoint_discovery", "responses": bundle}
+            try:
+                return self.client.run_katana(target)
+            except Exception as exc:
+                return {"error": str(exc), "success": False, "policy": "organic_crawl_only"}
+        if capability == "directory_bruteforce":
+            return {
+                "success": False,
+                "error": (
+                    "directory_bruteforce disabled — use http_surface_map and app_link_expand "
+                    "for organic link discovery (no wordlist spray)."
+                ),
+                "policy": "organic_only",
+            }
 
         # Filter out internal keys that shouldn't be sent to the server
         safe_opts = {k: v for k, v in options.items()
@@ -324,7 +324,11 @@ class HexstrikeAdapter:
             "vulnerability_scanning": lambda: self.client.run_nuclei(target, **safe_opts),
             # Web vulnerability testing
             "sql_injection_probing": lambda: self.client.run_sqlmap(target, **safe_opts),
-            "directory_bruteforce": lambda: self.client.run_gobuster(target, **safe_opts),
+            "directory_bruteforce": lambda: {
+                "success": False,
+                "error": "directory_bruteforce disabled — organic discovery only",
+                "policy": "organic_only",
+            },
             "xss_scanning": lambda: self.client.run_xsser(target, **safe_opts),
             "cms_scanning": lambda: self.client.run_wpscan(target, **safe_opts),
             # Credential attacks
@@ -739,8 +743,6 @@ class HexstrikeAdapter:
             "nmap": f"nmap -sV -T4 {quoted_target}",
             "httpx": f"httpx -silent -u {quoted_target}",
             "nuclei": f"nuclei -u {quoted_target} -silent",
-            "gobuster": f"gobuster dir -u {quoted_target} -w /usr/share/wordlists/dirb/common.txt -q",
-            "ffuf": f"ffuf -u {quoted_target}/FUZZ -w /usr/share/wordlists/dirb/common.txt -mc 200,301,302,403 -s",
             "nikto": f"nikto -h {quoted_target}",
             "wpscan": f"wpscan --url {quoted_target}",
             "sqlmap": f"sqlmap -u {quoted_target} --batch",

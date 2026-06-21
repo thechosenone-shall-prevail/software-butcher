@@ -233,9 +233,7 @@ def test_xampp_landing_does_not_probe_hardcoded_admin_paths(mock_cache, mock_fol
     probed_urls = [call.args[0] for call in mock_follow.call_args_list]
     assert not any("/phpmyadmin" in u for u in probed_urls)
     assert not any("/dashboard/phpinfo.php" in u for u in probed_urls)
-
-    admin_probes = [p for p in surface.get("semantic_probes") or [] if p.get("admin_probe")]
-    assert len(admin_probes) == 0
+    assert not surface.get("semantic_probes")
 
 
 @patch("software_butcher.shelves.web.http_surface.browser_navigate")

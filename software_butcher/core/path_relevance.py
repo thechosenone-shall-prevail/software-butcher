@@ -22,22 +22,8 @@ NOISE_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/[^/]+/(css|js|Images|images|vendor|assets|static|PHP)/?$", re.I),
 )
 
-# Paths that likely belong to the actual engagement application
-APP_PATH_SIGNALS: tuple[str, ...] = (
-    "hall",
-    "booking",
-    "book",
-    "portal",
-    "login",
-    "signin",
-    "auth",
-    "register",
-    "student",
-    "faculty",
-    "reservation",
-    "apply",
-    "app",
-)
+# Paths that likely belong to the actual engagement application — removed fixed
+# APP_PATH_SIGNALS wordlist; scoring uses organic discovery + page content only.
 
 XAMPP_TITLE_SIGNALS = ("xampp", "welcome to xampp", "apache friends")
 XAMPP_BODY_SIGNALS = ("xampp for linux", "apache friends", "phpmyadmin", "dashboard/index.html")
@@ -52,6 +38,7 @@ ORGANIC_GENERATORS = frozenset(
         "tool_output",
         "parent_path_rule",
         "content_intel",
+        "app_link_expand",
         "mysql_resource_intel",
         "stack_cve_intel",
         "broken_access",
@@ -163,11 +150,6 @@ def hypothesis_has_evidence_lineage(
     if generated_by in ORGANIC_GENERATORS:
         return True
 
-    if generated_by == "domain_semantics":
-        source = _trace_source_finding(hypothesis.source_finding_id, findings)
-        if source and (source.metadata or {}).get("stack_landing", {}).get("detected"):
-            return True
-
     if generated_by == "semantic_probe" and meta.get("reachable"):
         return True
 
@@ -231,11 +213,18 @@ def score_path(
     text = f"{path} {title} {page_context}".lower()
 
     score = 0.45
+    if organically_discovered:
+        score = max(score, 0.68)
     if "/api" in path or "swagger" in text or "openapi" in text:
         score = max(score, 0.78)
-    for signal in APP_PATH_SIGNALS:
-        if signal in path or signal in text:
-            score = max(score, 0.92 if signal == "hall" else 0.85)
+    if organically_discovered and any(
+        hint in path or hint in text for hint in ("login", "register", "signin", "auth", "portal")
+    ):
+        score = max(score, 0.82)
+    if page_context and any(
+        hint in page_context.lower() for hint in ("form", "login", "register", "booking", "application")
+    ):
+        score = max(score, 0.85)
 
     if path.rstrip("/") == "/dashboard":
         return 0.15
