@@ -184,7 +184,12 @@ def test_synthesis_compromised_when_flags_present():
 def test_shell_exploit_to_command_chain_e2e(tmp_path):
     """Recorded chain: exploit output opens session -> shell_command reads flag."""
     workspace = tmp_path / "ws"
-    scope = Scope(name="t", allowed_domains=["10.10.11.5"], max_tool_calls=5)
+    scope = Scope(
+        name="t",
+        allowed_domains=["10.10.11.5"],
+        max_tool_calls=5,
+        metadata={"engagement_type": "ctf"},
+    )
     project = ButcherProject(workspace, scope, resume=False)
     asset = project.add_asset(Asset(locator="http://10.10.11.5", asset_type="web_endpoint"))
     project.findings.set_base_target(asset.locator)

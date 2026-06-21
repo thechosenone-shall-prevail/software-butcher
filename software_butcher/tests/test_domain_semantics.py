@@ -14,7 +14,7 @@ def test_hallbooking_host_yields_hall_token():
 def test_semantic_candidates_cap_substring_spray():
     cands = semantic_path_candidates("http://hallbooking.srmrmp.edu.in")
     urls = [c["url"] for c in cands]
-    assert len(cands) <= 3
+    assert len(cands) <= 2
     assert "http://hallbooking.srmrmp.edu.in/hallbooking" in urls
     assert "http://hallbooking.srmrmp.edu.in/book" not in urls
     assert "http://hallbooking.srmrmp.edu.in/booking" not in urls
@@ -30,9 +30,13 @@ def test_semantic_candidates_include_hall_path():
 
 
 def test_engagement_context_adds_tokens():
-    cands = semantic_path_candidates(
+    without_ctx = semantic_path_candidates("http://portal.example.com")
+    with_ctx = semantic_path_candidates(
         "http://portal.example.com",
         engagement_context="faculty hall booking registration",
     )
-    urls = [c["url"] for c in cands]
-    assert any("/hall" in u for u in urls)
+    assert len(with_ctx) <= 2
+    assert any(c["source"] == "context" for c in with_ctx)
+    ctx_urls = {c["url"] for c in with_ctx if c["source"] == "context"}
+    baseline_urls = {c["url"] for c in without_ctx}
+    assert ctx_urls - baseline_urls

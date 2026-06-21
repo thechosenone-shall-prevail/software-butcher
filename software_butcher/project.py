@@ -31,9 +31,12 @@ class ButcherProject:
         if resume and self.state_path.exists():
             self.findings = FindingStore.load(self.state_path)
             self.resumed = True
+            self.findings.set_engagement_from_scope(scope)
         else:
             self.findings = FindingStore(self.state_path)
             self.resumed = False
+
+        self.findings.set_engagement_from_scope(scope)
 
         if resume and self.inventory_path.exists():
             self.inventory = AssetInventory.load(self.inventory_path)

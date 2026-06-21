@@ -14,12 +14,15 @@ def build_brain_context(
     clusters: dict[str, ConvergenceCluster] | None = None,
     session_store: SessionStore | None = None,
     limit: int = 40,
+    engagement_type: str | None = None,
 ) -> str:
     """Build a structured state summary for LLM capability selection."""
     clusters = clusters or recompute_clusters(findings)
     sorted_findings = sorted(findings, key=lambda f: f.created_at)[-limit:]
+    et = engagement_type or getattr(engagement, "engagement_type", None) or "assessment"
 
     lines = [
+        f"Engagement mode: {et}",
         f"Engagement phase: {engagement.phase}",
         f"Flags: user={engagement.user_flag or 'none'} root={engagement.root_flag or 'none'}",
         "",

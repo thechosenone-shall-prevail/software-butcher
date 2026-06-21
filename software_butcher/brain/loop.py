@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 from software_butcher.brain.context import build_brain_context
-from software_butcher.brain.prompts import BRAIN_CAPABILITY_PROMPT
+from software_butcher.brain.prompts import build_brain_capability_prompt
 from software_butcher.brain.guards import LoopGuard
 from software_butcher.brain.hypotheses import HypothesisGenerator
 from software_butcher.brain.llm_advisor import OpenRouterAdvisor
@@ -28,6 +28,8 @@ from software_butcher.state.schema import Finding
 from software_butcher.state.store import FindingStore
 
 # Re-export for tests that import BRAIN_SYSTEM_PROMPT
+from software_butcher.brain.prompts import BRAIN_CAPABILITY_PROMPT
+
 BRAIN_SYSTEM_PROMPT = BRAIN_CAPABILITY_PROMPT
 
 # Mapping from intent to default adapter used when hypothesis metadata overrides policy
@@ -285,7 +287,7 @@ def _apply_local_analysis_gate(
     hypothesis,
     decision: PolicyDecision,
 ) -> PolicyDecision:
-    """Prefer local http_surface over HexStrike for content-intel follow-ups."""
+    """Prefer local http_surface over HexStrike for assessment and content-intel follow-ups."""
     if (decision.options or {}).get("skip_execute"):
         return decision
 
@@ -293,7 +295,19 @@ def _apply_local_analysis_gate(
     if capability != "web_behavior_analysis":
         return decision
 
+    engagement_type = getattr(store, "_engagement_type", "assessment")
     meta = hypothesis.metadata or {}
+
+    if engagement_type == "assessment" and not _host_has_content_intel(store, host_key(hypothesis.path)):
+        recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=decision.asset,
+            preferred_adapter="http_surface",
+            reason="Assessment mode — read headers and page content locally before web_behavior_analysis.",
+            options={"capability": "http_surface_map"},
+        )
+
     if meta.get("generated_by") in {"content_intel", "mysql_resource_intel", "domain_semantics"}:
         return PolicyDecision(
             intent="http_surface_map",
@@ -533,12 +547,14 @@ def run_brain_once(
     # LLM-DRIVEN REASONING (Phase 2) — OpenRouter capability selector
     decision = None
     llm_disabled = getattr(store, "_llm_connectivity_failed", False)
+    engagement_type = getattr(store, "_engagement_type", "assessment")
     if llm_client is not None and isinstance(registry, AdapterRegistry) and not llm_disabled:
         context = build_brain_context(
             list(store.findings.values()),
             store.engagement,
             store.clusters,
             store.session_store,
+            engagement_type=engagement_type,
         )
         phase = store.engagement.phase
         pcs_mode = "validation" if store.pcs.state.validation_mode else "exploration"
@@ -551,7 +567,7 @@ def run_brain_once(
                 model=model_name,
                 messages=[{
                     "role": "system",
-                    "content": BRAIN_CAPABILITY_PROMPT
+                    "content": build_brain_capability_prompt(engagement_type),
                 }, {
                     "role": "user",
                     "content": (
@@ -718,7 +734,10 @@ def run_brain_once(
             capability=str((decision.options or {}).get("capability") or decision.intent or ""),
         ):
             if _ingest_finding(store, finding, branch_id, on_finding_ingested):
-                for generated in hypothesis_generator.generate(finding):
+                for generated in hypothesis_generator.generate(
+                    finding,
+                    engagement_type=getattr(store, "_engagement_type", "assessment"),
+                ):
                     store.add_hypothesis(generated)
                 if primary_finding is None:
                     primary_finding = finding
@@ -738,7 +757,10 @@ def run_brain_once(
             on_finding_ingested=on_finding_ingested,
         )
         if primary_finding:
-            for generated in hypothesis_generator.generate(primary_finding):
+            for generated in hypothesis_generator.generate(
+                primary_finding,
+                engagement_type=getattr(store, "_engagement_type", "assessment"),
+            ):
                 store.add_hypothesis(generated)
 
     store.queue.complete(hypothesis.id)
@@ -806,6 +828,8 @@ class BrainLoop:
     ) -> None:
         self.store = store
         self.scope = scope
+        if scope is not None:
+            store.set_engagement_from_scope(scope)
         self.registry = registry or default_registry()
         self.max_steps = max_steps
         self.no_new_limit = no_new_limit

@@ -9,7 +9,7 @@ from software_butcher.core.adapter import AdapterCapability, AdapterRequest, Ada
 from software_butcher.core.assets import Asset
 from software_butcher.core.registry import AdapterRegistry
 from software_butcher.core.scope import Scope
-from software_butcher.state.schema import Hypothesis
+from software_butcher.state.schema import Finding, Hypothesis
 from software_butcher.state.store import FindingStore
 
 
@@ -48,22 +48,33 @@ class StubAdapter:
 def test_tool_budget_stops_execution(tmp_path):
     store = FindingStore(tmp_path / "state.json")
     scope = Scope(name="t", allowed_domains=["example.com"], max_tool_calls=1)
+    store.set_base_target("https://example.com")
+    store.set_engagement_from_scope(scope)
+    seed_meta = {"asset_type": "web_endpoint", "intent": "discover", "generated_by": "recon_checklist"}
     store.add_hypothesis(
         Hypothesis(
             path="https://example.com",
             reason="seed",
-            source_finding_id="manual",
+            source_finding_id="recon:seed",
             priority=1.0,
-            metadata={"asset_type": "web_endpoint", "intent": "discover"},
+            metadata=seed_meta,
         )
     )
+    root = Finding(
+        path="https://example.com",
+        hypothesis="root map",
+        provenance="test",
+        evidence=["discovered https://example.com/admin"],
+    )
+    store.findings[root.id] = root
+    store.queue.configure(findings=store.findings, engagement_type=store._engagement_type)
     store.add_hypothesis(
         Hypothesis(
             path="https://example.com/admin",
             reason="follow-up",
-            source_finding_id="manual",
+            source_finding_id=root.id,
             priority=0.9,
-            metadata={"asset_type": "web_endpoint", "intent": "discover"},
+            metadata={"asset_type": "web_endpoint", "intent": "discover", "generated_by": "html_link"},
         )
     )
 
@@ -85,15 +96,29 @@ def test_parallel_branches_run_multiple_adapters(tmp_path):
     for cap in ("http_surface_map",):
         store.recon_checklist.mark("example.com", cap)
     scope = Scope(name="t", allowed_domains=["example.com"], max_tool_calls=10)
+    store.set_engagement_from_scope(scope)
+
+    root = Finding(
+        path="https://example.com",
+        hypothesis="root",
+        provenance="test",
+        evidence=[
+            "discovered https://example.com/a",
+            "discovered https://example.com/b",
+            "discovered https://example.com/c",
+        ],
+    )
+    store.findings[root.id] = root
+    store.queue.configure(findings=store.findings, engagement_type=store._engagement_type)
 
     for path in ("https://example.com/a", "https://example.com/b", "https://example.com/c"):
         store.add_hypothesis(
             Hypothesis(
                 path=path,
                 reason=f"test {path}",
-                source_finding_id="manual",
+                source_finding_id=root.id,
                 priority=1.0,
-                metadata={"asset_type": "web_endpoint", "intent": "discover"},
+                metadata={"asset_type": "web_endpoint", "intent": "discover", "generated_by": "html_link"},
             )
         )
 

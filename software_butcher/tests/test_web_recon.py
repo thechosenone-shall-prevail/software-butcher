@@ -191,8 +191,12 @@ def test_findings_from_adapter_result_stamps_capability():
 def test_queue_dedupes_same_path_and_intent():
     queue = HypothesisQueue()
     target = "http://hallbooking.srmrmp.edu.in"
-    meta = {"intent": "http_surface_map", "asset_type": "web_endpoint"}
-    queue.add(Hypothesis(path=target, reason="first", source_finding_id="a", metadata=meta))
-    queue.add(Hypothesis(path=target, reason="second duplicate", source_finding_id="b", metadata=meta))
+    meta = {
+        "intent": "http_surface_map",
+        "asset_type": "web_endpoint",
+        "generated_by": "recon_checklist",
+    }
+    queue.add(Hypothesis(path=target, reason="first", source_finding_id="recon:seed", metadata=meta))
+    queue.add(Hypothesis(path=target, reason="second duplicate", source_finding_id="recon:seed", metadata=meta))
     pending = [h for h in queue.pending_list() if h.metadata.get("intent") == "http_surface_map"]
     assert len(pending) == 1

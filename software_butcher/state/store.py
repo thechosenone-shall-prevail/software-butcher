@@ -10,7 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from .convergence import apply_cluster_stats, cluster_theme, detect_flags, recompute_clusters
-from .engagement import EngagementState, infer_phase, phase_hypotheses
+from .engagement import EngagementState, infer_phase, normalize_engagement_type, phase_hypotheses
 from .hypothesis_queue import HypothesisQueue
 from .pcs import PCSState, ProgressiveConvergenceSearch
 from .recon_checklist import ReconChecklist, record_recon_progress
@@ -41,6 +41,27 @@ class FindingStore:
         self.transport_state = TransportState()
         self.clusters: dict[str, ConvergenceCluster] = {}
         self._base_target: str = ""
+        self._engagement_type: str = "assessment"
+        self._sync_queue_config()
+
+    def set_engagement_from_scope(self, scope: Any) -> None:
+        """Read engagement_type from scope.metadata (default assessment)."""
+        meta: dict[str, Any] = {}
+        if scope is not None:
+            if hasattr(scope, "metadata"):
+                meta = scope.metadata or {}
+            elif isinstance(scope, dict):
+                meta = scope.get("metadata") or {}
+        self._engagement_type = normalize_engagement_type(meta.get("engagement_type"))
+        self.engagement.engagement_type = self._engagement_type
+        self._sync_queue_config()
+
+    def _sync_queue_config(self) -> None:
+        self.queue.configure(
+            findings=self.findings,
+            engagement_type=self._engagement_type,
+            session_store=self.session_store,
+        )
 
     def set_base_target(self, target: str) -> None:
         self._base_target = target
@@ -109,10 +130,21 @@ class FindingStore:
             apply_cluster_stats(finding, self.clusters)
             process_finding(finding)
 
-        self.engagement = infer_phase(list(self.findings.values()), self.engagement)
+        self._sync_queue_config()
+        self.engagement = infer_phase(
+            list(self.findings.values()),
+            self.engagement,
+            engagement_type=self._engagement_type,
+            session_store=self.session_store,
+        )
 
         if self._base_target:
-            for hyp in phase_hypotheses(self.engagement, self._base_target, self.session_store):
+            for hyp in phase_hypotheses(
+                self.engagement,
+                self._base_target,
+                self.session_store,
+                engagement_type=self._engagement_type,
+            ):
                 self.queue.add(hyp, self._base_target)
 
     def add_hypothesis(self, hypothesis: Hypothesis) -> None:
@@ -178,6 +210,7 @@ class FindingStore:
         payload = json.loads(path.read_text(encoding="utf-8"))
         store.tool_calls = int(payload.get("tool_calls") or 0)
         store.engagement = EngagementState.from_dict(payload.get("engagement", {}))
+        store._engagement_type = store.engagement.engagement_type
         store.pcs = ProgressiveConvergenceSearch(PCSState.from_dict(payload.get("pcs", {})))
         store.recon_checklist = ReconChecklist.from_dict(payload.get("recon", {}))
         store.transport_state = TransportState.from_dict(payload.get("transport", {}))
@@ -228,6 +261,7 @@ class FindingStore:
 
         session_path = Path(path).parent / "session_state.json"
         store.session_store = SessionStore.load(session_path)
+        store._sync_queue_config()
         store._recompute_state_unlocked()
 
         return store

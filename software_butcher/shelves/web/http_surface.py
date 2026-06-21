@@ -251,7 +251,7 @@ def map_http_surface(
     engagement_context = str(meta.get("engagement_context") or "")
 
     if stack_landing.get("detected"):
-        for cand in semantic_path_candidates(base, engagement_context=engagement_context):
+        for cand in semantic_path_candidates(base, engagement_context=engagement_context, max_paths=2):
             probe_url = str(cand["url"])
             if probe_url.rstrip("/").lower() in seen:
                 continue

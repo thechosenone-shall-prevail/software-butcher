@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from software_butcher.core.asset_classifier import is_static_asset
 from software_butcher.core.domain_semantics import semantic_path_candidates
-from software_butcher.core.path_relevance import is_hypothesis_path_allowed, is_noise_path, score_path
+from software_butcher.core.path_relevance import is_noise_path, score_path
+from software_butcher.state.engagement import normalize_engagement_type
 from software_butcher.core.url_utils import base_web_url
 from software_butcher.state.path_graph import parent_path
 from software_butcher.state.schema import Finding, Hypothesis
@@ -39,8 +40,9 @@ class HypothesisGenerator:
     EXPLOIT_SIGNALS = ("cve-", "exploit", "rce", "remote code execution", "command injection")
     XSS_SIGNALS = ("xss", "cross-site scripting", "reflected", "stored xss", "dom-based")
 
-    def generate(self, finding: Finding) -> list[Hypothesis]:
+    def generate(self, finding: Finding, *, engagement_type: str = "assessment") -> list[Hypothesis]:
         generated: list[Hypothesis] = []
+        et = normalize_engagement_type(engagement_type)
 
         # Double-guard: skip static assets whether the asset_type was set correctly
         # or the path extension alone reveals the static nature of the resource.
@@ -55,14 +57,23 @@ class HypothesisGenerator:
         if finding.asset_type in {"web_endpoint", "api"}:
             path_score = score_path(finding.path, title=str((finding.metadata or {}).get("title") or ""))
             if path_score >= 0.6 and any(signal in path_stem for signal in self.ADMIN_SIGNALS):
-
+                admin_intent = "http_surface_map" if et == "assessment" else "web_behavior_analysis"
                 generated.append(
                     Hypothesis(
                         path=finding.path,
-                        reason="Admin/auth surface should receive behavior-level validation.",
+                        reason=(
+                            "Admin/auth surface — read headers, forms, and session behavior locally "
+                            "before any remote scanner."
+                            if et == "assessment"
+                            else "Admin/auth surface should receive behavior-level validation."
+                        ),
                         source_finding_id=finding.id,
                         priority=0.8,
-                        metadata={"intent": "web_behavior_analysis", "asset_type": finding.asset_type},
+                        metadata={
+                            "intent": admin_intent,
+                            "asset_type": finding.asset_type,
+                            "generated_by": "content_intel",
+                        },
                     )
                 )
 
@@ -274,13 +285,16 @@ class HypothesisGenerator:
                         )
                     )
 
-            for cand in semantic_path_candidates(base, engagement_context=ctx):
+            for cand in semantic_path_candidates(
+                base,
+                engagement_context=ctx,
+                max_paths=2,
+                mapped_urls=analyzed_urls,
+            ):
                 url = str(cand["url"])
                 if url.rstrip("/").lower() in analyzed_urls:
                     continue
                 if score_path(url) < 0.5:
-                    continue
-                if not is_hypothesis_path_allowed(url, metadata={"generated_by": "domain_semantics"}):
                     continue
                 generated.append(
                     Hypothesis(

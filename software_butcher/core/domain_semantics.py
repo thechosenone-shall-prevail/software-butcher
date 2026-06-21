@@ -64,53 +64,64 @@ def tokens_from_context(context: str) -> list[str]:
     return tokens
 
 
-_ROLE_CONTEXT_TOKENS = frozenset({"faculty", "student"})
-
-
-def _pick_context_token(context: str, host_tokens: list[str]) -> str | None:
-    ctx = tokens_from_context(context)
-    app_in_ctx = [t for t in ctx if t in APP_PATH_SIGNALS and t not in host_tokens]
-    if app_in_ctx:
-        domain_tokens = [t for t in app_in_ctx if t not in _ROLE_CONTEXT_TOKENS]
-        return domain_tokens[0] if domain_tokens else app_in_ctx[0]
-    for token in ctx:
-        if token not in host_tokens:
-            return token
-    return None
+def _token_overlap_score(token: str, label: str, context_tokens: list[str]) -> float:
+    """Rank tokens by overlap with hostname label and engagement context."""
+    token_l = token.lower()
+    score = 0.5
+    if token_l == label:
+        score = 0.95
+    elif token_l in label:
+        score = max(score, 0.88 + (len(token_l) / max(len(label), 1)) * 0.06)
+    if token_l in context_tokens:
+        idx = context_tokens.index(token_l)
+        score = max(score, 0.82 + idx * 0.01)
+        if token_l in APP_PATH_SIGNALS:
+            # Application-path signals from scope context outrank generic long words.
+            score = max(score, 0.88 - idx * 0.005)
+    for ctx_word in context_tokens:
+        if token_l in ctx_word or ctx_word in token_l:
+            score = max(score, 0.78)
+    return min(score, 0.99)
 
 
 def semantic_path_candidates(
     base_url: str,
     *,
     engagement_context: str = "",
-    max_paths: int = 3,
+    max_paths: int = 2,
     probe_evidence: dict[str, bool] | None = None,
+    mapped_urls: set[str] | None = None,
 ) -> list[dict[str, str | float]]:
     """Return ranked path hypotheses derived from hostname and engagement context.
 
-    Caps probes to avoid spraying every hostname substring (/book, /booking, /hall).
+    Caps at *max_paths* (default 2) to avoid spraying every hostname substring.
+    Skips URLs already present in *mapped_urls* (content intel or prior probes).
     When *probe_evidence* maps a URL to True (HTTP 2xx/3xx), those paths rank first.
     """
     base = base_web_url(base_url).rstrip("/")
     label = _host_label(base_url)
     host_tokens = tokens_from_host(base_url)
+    context_tokens = tokens_from_context(engagement_context)
+    mapped = {u.rstrip("/").lower() for u in (mapped_urls or set())}
     seen: set[str] = set()
     candidates: list[dict[str, str | float]] = []
 
     ranked_tokens: list[tuple[str, str, float]] = []
     for token in host_tokens:
         source = "hostname"
-        score = 0.95 if token == label else 0.92
+        score = _token_overlap_score(token, label, context_tokens)
         ranked_tokens.append((token, source, score))
-    context_token = _pick_context_token(engagement_context, host_tokens)
-    if context_token:
-        ranked_tokens.append((context_token, "context", 0.85))
+    for token in context_tokens:
+        if token not in host_tokens:
+            ranked_tokens.append((token, "context", _token_overlap_score(token, label, context_tokens)))
+
+    ranked_tokens.sort(key=lambda item: -item[2])
 
     evidence = probe_evidence or {}
     for token, source, score in ranked_tokens:
         url = f"{base}/{token}".rstrip("/")
         key = url.lower()
-        if key in seen or key == base.lower():
+        if key in seen or key == base.lower() or key in mapped:
             continue
         seen.add(key)
         if evidence.get(key):
@@ -123,11 +134,12 @@ def semantic_path_candidates(
                 "source": source,
                 "score": score,
                 "rationale": (
-                    f"Path '/{token}' inferred from target {source} — "
-                    "prioritized semantic probe, not blind wordlist spray."
+                    f"Path '/{token}' inferred from target {source} (overlap-ranked) — "
+                    "scoped semantic probe, not blind wordlist spray."
                 ),
             }
         )
 
     candidates.sort(key=lambda c: -float(c["score"]))
     return candidates[:max_paths]
+

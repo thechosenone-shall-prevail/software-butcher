@@ -31,11 +31,21 @@ def test_stack_landing_generates_semantic_hypotheses_not_scanners():
     assert not any(h.metadata.get("intent") == "directory_bruteforce" for h in hyps)
     assert not any(h.metadata.get("intent") == "bugbounty_osint" for h in hyps)
     semantic = [h for h in hyps if h.metadata.get("generated_by") == "domain_semantics"]
-    assert len(semantic) <= 3
+    assert len(semantic) <= 2
 
 
-def test_queue_rejects_ctf_filesystem_paths():
+def test_queue_rejects_unlinked_flag_paths():
+    finding = Finding(
+        path="http://hallbooking.srmrmp.edu.in",
+        hypothesis="surface map",
+        provenance="http_surface:map",
+        metadata={
+            "capability": "http_surface_map",
+            "stack_landing": {"detected": True},
+        },
+    )
     queue = HypothesisQueue()
+    queue.configure(findings={finding.id: finding}, engagement_type="assessment")
     base = "http://hallbooking.srmrmp.edu.in"
     queue.add(
         Hypothesis(
