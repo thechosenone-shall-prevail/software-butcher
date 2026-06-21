@@ -14,7 +14,7 @@ from software_butcher.core.path_relevance import (
     summarize_page_content,
 )
 from software_butcher.core.adapter import AdapterCapability, AdapterRequest, AdapterResult
-from software_butcher.core.url_utils import base_web_url, host_key, same_origin
+from software_butcher.core.url_utils import base_web_url, engagement_entry_url, host_key, same_origin
 from software_butcher.shelves.hexstrike.interpreter import HexStrikeInterpreter
 from software_butcher.shelves.web.app_link_expand import expand_organic_app_links
 from software_butcher.shelves.web.browser_nav import browser_navigate
@@ -212,8 +212,10 @@ def map_http_surface(
     use_browser: bool = True,
 ) -> dict[str, Any]:
     """Deep surface map: dual HTTP profiles, infrastructure intel, optional browser truth."""
-    base = base_web_url(url)
-    host = host_key(base)
+    origin = base_web_url(url)
+    # Preserve scoped --target paths (e.g. /hall/) — do not collapse to hostname root.
+    map_target = engagement_entry_url(url) or origin
+    host = host_key(origin)
     ts = transport_state or TransportState()
     ts.apply_wait(host)
 
@@ -231,14 +233,14 @@ def map_http_surface(
 
     transport.on_rate_limit = on_rate_limit
 
-    browser_get = transport.follow_redirects(base, "GET", profile="browser", host=host)
-    assessment_get = transport.follow_redirects(base, "GET", profile="assessment", host=host)
-    head = transport.follow_redirects(base, "HEAD", profile="browser", host=host)
+    browser_get = transport.follow_redirects(map_target, "GET", profile="browser", host=host)
+    assessment_get = transport.follow_redirects(map_target, "GET", profile="assessment", host=host)
+    head = transport.follow_redirects(map_target, "HEAD", profile="browser", host=host)
 
     headers = browser_get.headers or head.headers or {}
     html = browser_get.body or ""
-    curl_final = browser_get.final_url or base
-    assessment_final = assessment_get.final_url or base
+    curl_final = browser_get.final_url or map_target
+    assessment_final = assessment_get.final_url or map_target
 
     infra_browser = analyze_infrastructure(
         status_code=browser_get.status_code,
@@ -267,15 +269,15 @@ def map_http_surface(
 
     interpreter = HexStrikeInterpreter()
     links = interpreter.extract_html_links(curl_final, html) if html else []
-    redirect_urls = _urls_from_redirect_chain(browser_get.redirect_chain, base)
-    well_known_urls = _fetch_well_known_urls(transport, base, host)
+    redirect_urls = _urls_from_redirect_chain(browser_get.redirect_chain, origin)
+    well_known_urls = _fetch_well_known_urls(transport, origin, host)
 
-    browser_result = browser_navigate(base, enabled=use_browser)
+    browser_result = browser_navigate(map_target, enabled=use_browser)
     browser_urls: list[str] = []
     if browser_result.success:
         browser_urls.extend(browser_result.discovered_urls)
         for hop in browser_result.redirect_chain:
-            if same_origin(hop, base):
+            if same_origin(hop, origin):
                 browser_urls.append(hop.rstrip("/"))
 
     profile_divergence = curl_final.rstrip("/") != assessment_final.rstrip("/")
@@ -288,13 +290,13 @@ def map_http_surface(
     seen: set[str] = set()
     for link in (*redirect_urls, *links, *well_known_urls, *browser_urls):
         normalized = link.rstrip("/") if link else ""
-        if normalized and same_origin(normalized, base) and normalized not in seen:
+        if normalized and same_origin(normalized, origin) and normalized not in seen:
             seen.add(normalized)
             discovered.append(normalized)
 
     if browser_result.success and browser_result.final_url.rstrip("/") not in seen:
         final = browser_result.final_url.rstrip("/")
-        if same_origin(final, base):
+        if same_origin(final, origin):
             seen.add(final)
             discovered.append(final)
 
@@ -321,7 +323,7 @@ def map_http_surface(
 
     if _admin_panel_urls(discovered):
         _fetch_and_analyze_admin_panels(
-            transport, base, host, discovered, content_pages, seen, nvd_api_key=nvd_api_key
+            transport, origin, host, discovered, content_pages, seen, nvd_api_key=nvd_api_key
         )
 
     # Organic app expansion from entry pages with forms (links/redirects only).
@@ -338,7 +340,7 @@ def map_http_surface(
     if entry_urls:
         app_expand_result = expand_organic_app_links(
             transport,
-            base,
+            origin,
             host,
             entry_urls=entry_urls,
             seen=seen,
@@ -375,7 +377,7 @@ def map_http_surface(
             prioritized.append(link)
 
     surface = {
-        "target": base,
+        "target": map_target,
         "final_url": curl_final,
         "browser_final_url": browser_result.final_url if browser_result.success else None,
         "assessment_final_url": assessment_final,

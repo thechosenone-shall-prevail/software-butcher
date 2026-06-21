@@ -252,6 +252,16 @@ class HypothesisQueue:
             key=lambda hyp: (-self._effective_priority(hyp), hyp.created_at),
         )
 
+    def refresh_pending_promotions(self) -> None:
+        """Rewrite stale surface-map queue items after finding state changes."""
+        if self._lock:
+            with self._lock:
+                pending = [item for item in self._items.values() if item.status == "pending"]
+                self._promote_pending_analysis(pending)
+            return
+        pending = [item for item in self._items.values() if item.status == "pending"]
+        self._promote_pending_analysis(pending)
+
     def complete(self, hypothesis_id: str) -> None:
         if self._lock:
             with self._lock:

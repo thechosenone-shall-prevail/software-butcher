@@ -433,6 +433,94 @@ def test_store_queues_followups_after_minimal_hall_map(tmp_path):
     assert store.queue.next() is not None
 
 
+def test_live_hall_remap_regression_host_root_finding_does_not_satisfy_entry(tmp_path):
+    """Documents the live failure: host-root finding does not mark /hall/ as mapped."""
+    from software_butcher.brain.loop import _url_has_content_map
+    from software_butcher.core.scope import Scope
+    from software_butcher.state.store import FindingStore
+
+    store = FindingStore(tmp_path / "state.json")
+    scope = Scope(name="t", allowed_domains=["example.edu"], metadata={"engagement_type": "assessment"})
+    base = "http://example.edu/hall/"
+    store.set_base_target(base)
+    store.set_engagement_from_scope(scope)
+
+    broken = Finding(
+        hypothesis="surface map",
+        path="http://example.edu",
+        provenance="http_surface:map",
+        metadata={
+            "capability": "http_surface_map",
+            "content_analysis": True,
+            "mapped_target": "http://example.edu",
+            "content_pages": [{"url": "http://example.edu/dashboard/", "page_type": "stack_landing"}],
+        },
+    )
+    store.ingest_finding(broken)
+    assert not _url_has_content_map(store, "example.edu", "http://example.edu/hall")
+    n = store.queue.next()
+    assert n is not None
+    assert (n.metadata or {}).get("intent") == "http_surface_map"
+
+
+def test_live_hall_remap_regression_scoped_finding_advances_to_posture(tmp_path):
+    """After scoped /hall/ surface map, step 2 must be security_posture_audit not remap."""
+    from software_butcher.brain.loop import _apply_observation_completeness_gate
+    from software_butcher.brain.policy import PolicyDecision
+    from software_butcher.core.assets import Asset
+    from software_butcher.core.scope import Scope
+    from software_butcher.state.store import FindingStore
+
+    store = FindingStore(tmp_path / "state.json")
+    scope = Scope(name="t", allowed_domains=["example.edu"], metadata={"engagement_type": "assessment"})
+    base = "http://example.edu/hall/"
+    store.set_base_target(base)
+    store.set_engagement_from_scope(scope)
+
+    finding = Finding(
+        hypothesis="surface map",
+        path="http://example.edu/hall/",
+        provenance="http_surface:map",
+        metadata={
+            "capability": "http_surface_map",
+            "content_analysis": True,
+            "mapped_target": "http://example.edu/hall/",
+            "content_pages": [
+                {
+                    "url": "http://example.edu/hall/",
+                    "conclusions": ["Hall booking portal"],
+                    "form_count": 1,
+                }
+            ],
+        },
+    )
+    store.ingest_finding(finding)
+    store.recon_checklist.mark("example.edu", "http_surface_map")
+
+    n = store.queue.next()
+    assert n is not None
+    assert (n.metadata or {}).get("intent") == "security_posture_audit"
+
+    remap = _apply_observation_completeness_gate(
+        store,
+        Hypothesis(
+            path="http://example.edu/hall/",
+            reason="stale remap",
+            source_finding_id=finding.id,
+            metadata={"intent": "http_surface_map", "generated_by": "app_link_expand"},
+        ),
+        PolicyDecision(
+            intent="http_surface_map",
+            asset=Asset(locator="http://example.edu/hall/", asset_type="web_endpoint"),
+            preferred_adapter="http_surface",
+            reason="LLM chose remap",
+            options={"capability": "http_surface_map"},
+        ),
+    )
+    assert remap.intent == "security_posture_audit"
+    assert remap.options["capability"] == "security_posture_audit"
+
+
 def test_queue_promotes_surface_map_to_posture_after_hall_mapped():
     finding = Finding(
         hypothesis="surface map",

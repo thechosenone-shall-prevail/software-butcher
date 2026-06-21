@@ -1197,6 +1197,29 @@ def run_brain_once(
     elif decision is None:
         decision = policy.decide(asset_for_policy, list(store.findings.values()))
 
+    # When the queue still carries http_surface_map but this URL is already observed,
+    # advance locally before gates/LLM can repeat a no-op remap (scoped /hall/ regression).
+    if str((decision.options or {}).get("capability") or decision.intent or "") == "http_surface_map":
+        host = host_key(hypothesis.path)
+        target_url = hypothesis.path.rstrip("/")
+        if _url_has_content_map(store, host, target_url):
+            next_cap = _next_analysis_capability(store, host, target_url) or "security_posture_audit"
+            decision = PolicyDecision(
+                intent=next_cap,
+                asset=Asset(
+                    locator=target_url,
+                    asset_type=asset_for_policy.asset_type if asset_for_policy.asset_type != "unknown" else "web_endpoint",
+                    parent=asset_for_policy.parent,
+                    metadata=asset_for_policy.metadata,
+                ),
+                preferred_adapter="web_audit",
+                reason=(
+                    f"URL {target_url} already surface-mapped; advancing to {next_cap} "
+                    f"instead of repeating http_surface_map."
+                ),
+                options={"capability": next_cap},
+            )
+
     decision = _apply_recon_gate(store, hypothesis, decision, explicit_intent)
     decision = _apply_path_relevance_gate(store, hypothesis, decision)
     decision = _apply_observation_completeness_gate(store, hypothesis, decision)

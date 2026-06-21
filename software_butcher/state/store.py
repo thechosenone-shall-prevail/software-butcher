@@ -140,6 +140,7 @@ class FindingStore:
             process_finding(finding)
 
         self._sync_queue_config()
+        self.queue.refresh_pending_promotions()
         self.queue.prune_out_of_app_scope()
         app_root = infer_application_root(self.findings.values(), self._base_target)
         if app_root is not None and self._engagement_type == "assessment":

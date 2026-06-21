@@ -101,6 +101,40 @@ def test_map_http_surface_collects_headers_and_links(mock_cache, mock_follow, _m
 @patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
 @patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.follow_redirects")
 @patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.probe_cache_behavior", return_value={})
+def test_map_http_surface_preserves_scoped_entry_path(mock_cache, mock_follow, _mock_well_known, _mock_browser):
+    """Regression: --target http://host/hall/ must map /hall, not collapse to hostname root."""
+    _mock_browser.return_value = MagicMock(
+        success=False, final_url="", title="", redirect_chain=[], discovered_urls=[], error="disabled",
+    )
+    _mock_browser.return_value.to_dict.return_value = {}
+
+    scoped = "http://example.edu/hall"
+    html = '<html><head><title>Hall booking</title></head><body><form action="book.php"></form></body></html>'
+
+    def _follow(url, *args, **kwargs):
+        return _resp(
+            url,
+            headers={"Server": "Apache", "Content-Type": "text/html"},
+            body=html,
+        )
+
+    mock_follow.side_effect = _follow
+
+    surface = map_http_surface(f"{scoped}/", use_browser=False)
+    assert surface["target"].rstrip("/").lower() == scoped.rstrip("/").lower()
+    assert mock_follow.call_args_list[0][0][0].rstrip("/").lower() == scoped.rstrip("/").lower()
+
+    adapter = HttpSurfaceAdapter()
+    findings = adapter._findings_from_surface(surface, "web_endpoint")
+    primary = findings[0]
+    assert primary["path"].rstrip("/").lower() == scoped.rstrip("/").lower()
+    assert primary["metadata"]["mapped_target"].rstrip("/").lower() == scoped.rstrip("/").lower()
+
+
+@patch("software_butcher.shelves.web.http_surface.browser_navigate")
+@patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.follow_redirects")
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.probe_cache_behavior", return_value={})
 def test_map_http_surface_includes_redirect_chain_urls(mock_cache, mock_follow, _mock_well_known, _mock_browser):
     _mock_browser.return_value = MagicMock(
         success=False, final_url="", title="", redirect_chain=[], discovered_urls=[], error="disabled",
