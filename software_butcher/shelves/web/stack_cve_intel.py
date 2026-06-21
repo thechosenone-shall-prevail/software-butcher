@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+# Curated shortlist of CVE/component identifiers for local viability reasoning on
+# mapped stack signals — not a live CVE database and not used for blind scanning.
 APACHE_VERSION_RE = re.compile(r"Apache[/\s]?([\d.]+)", re.I)
 PHPMYADMIN_VERSION_RE = re.compile(r"phpMyAdmin[^0-9]*([\d.]+)", re.I)
 

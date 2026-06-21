@@ -40,15 +40,17 @@ ROBOTS_SITEMAP_RE = re.compile(r"^Sitemap:\s*(\S+)", re.IGNORECASE | re.MULTILIN
 ROBOTS_PATH_RE = re.compile(r"^(?:Allow|Disallow):\s*(/\S*)", re.IGNORECASE | re.MULTILINE)
 SITEMAP_LOC_RE = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.IGNORECASE)
 
-
 ADMIN_PANEL_MARKERS = ("phpmyadmin", "phpinfo")
 
 
-def _admin_panel_urls(base: str, discovered: list[str], body: str) -> list[str]:
-    """Collect phpMyAdmin/phpinfo URLs from organic links or XAMPP page mentions."""
+def _normalize_url_key(url: str) -> str:
+    return (url or "").rstrip("/").lower()
+
+
+def _admin_panel_urls(discovered: list[str]) -> list[str]:
+    """Collect phpMyAdmin/phpinfo URLs from organic hrefs, redirects, or other discovered links."""
     candidates: list[str] = []
     seen: set[str] = set()
-    body_l = (body or "")[:8000].lower()
 
     for link in discovered:
         if any(marker in link.lower() for marker in ADMIN_PANEL_MARKERS):
@@ -56,19 +58,6 @@ def _admin_panel_urls(base: str, discovered: list[str], body: str) -> list[str]:
             if normalized not in seen:
                 seen.add(normalized)
                 candidates.append(normalized)
-
-    parsed = urllib.parse.urlsplit(base_web_url(base))
-    origin = f"{parsed.scheme}://{parsed.netloc}"
-    fallbacks = (
-        ("/phpmyadmin", "phpmyadmin"),
-        ("/dashboard/phpinfo.php", "phpinfo"),
-    )
-    for suffix, marker in fallbacks:
-        if marker in body_l:
-            url = (origin + suffix).rstrip("/")
-            if url not in seen:
-                seen.add(url)
-                candidates.append(url)
     return candidates
 
 
@@ -77,14 +66,13 @@ def _fetch_and_analyze_admin_panels(
     base: str,
     host: str,
     discovered: list[str],
-    body: str,
     content_pages: list[dict[str, Any]],
     seen: set[str],
 ) -> None:
     """Follow organic admin-panel links and run view-source content analysis."""
     analyzed = {_normalize_url_key(str(p.get("url") or "")) for p in content_pages}
 
-    for admin_url in _admin_panel_urls(base, discovered, body):
+    for admin_url in _admin_panel_urls(discovered):
         key = admin_url.rstrip("/").lower()
         if key in analyzed:
             continue
@@ -104,10 +92,6 @@ def _fetch_and_analyze_admin_panels(
         if normalized not in seen:
             seen.add(normalized)
             discovered.append(normalized)
-
-
-def _normalize_url_key(url: str) -> str:
-    return (url or "").rstrip("/").lower()
 
 
 def infer_technologies(headers: dict[str, str]) -> list[str]:
@@ -359,9 +343,9 @@ def map_http_surface(
     )
     content_pages.append(root_content)
 
-    if stack_landing.get("detected") or any(m in (html or "").lower() for m in ADMIN_PANEL_MARKERS):
+    if _admin_panel_urls(discovered):
         _fetch_and_analyze_admin_panels(
-            transport, base, host, discovered, html, content_pages, seen
+            transport, base, host, discovered, content_pages, seen
         )
 
     for probe in semantic_probes:
@@ -371,9 +355,9 @@ def map_http_surface(
     scored_urls: list[dict[str, Any]] = []
     prioritized: list[str] = []
     for link in discovered:
-        sc = score_path(link, title=title, page_context=page_summary)
+        sc = score_path(link, title=title, page_context=page_summary, organically_discovered=True)
         scored_urls.append({"url": link, "score": sc})
-        if should_queue_path(link, title=title, page_context=page_summary):
+        if should_queue_path(link, title=title, page_context=page_summary, organically_discovered=True):
             prioritized.append(link)
 
     return {
@@ -611,7 +595,12 @@ class HttpSurfaceAdapter:
             )
 
         for link in surface.get("discovered_urls") or []:
-            link_score = score_path(link, title=surface.get("title") or "", page_context=surface.get("page_summary") or "")
+            link_score = score_path(
+                link,
+                title=surface.get("title") or "",
+                page_context=surface.get("page_summary") or "",
+                organically_discovered=True,
+            )
             findings.append(
                 {
                     "hypothesis": f"High-value path from surface map (score={link_score:.2f}): {link}",

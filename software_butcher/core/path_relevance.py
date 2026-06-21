@@ -19,7 +19,7 @@ NOISE_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/icons/", re.I),
     re.compile(r"\.(png|jpe?g|gif|svg|ico|css|js|woff2?)$", re.I),
     re.compile(r"/(css|js|Images|images|vendor|assets|static)/?$", re.I),
-    re.compile(r"/hall/(css|js|Images|vendor|PHP)/?$", re.I),
+    re.compile(r"/[^/]+/(css|js|Images|images|vendor|assets|static|PHP)/?$", re.I),
 )
 
 # Paths that likely belong to the actual engagement application
@@ -212,7 +212,13 @@ def is_noise_path(url: str) -> bool:
     return any(pattern.search(path) for pattern in NOISE_PATH_PATTERNS)
 
 
-def score_path(url: str, *, title: str = "", page_context: str = "") -> float:
+def score_path(
+    url: str,
+    *,
+    title: str = "",
+    page_context: str = "",
+    organically_discovered: bool = False,
+) -> float:
     """Return 0.0 (ignore) – 1.0 (investigate first)."""
     if is_noise_path(url):
         return 0.05
@@ -230,8 +236,8 @@ def score_path(url: str, *, title: str = "", page_context: str = "") -> float:
     if path.rstrip("/") == "/dashboard":
         return 0.15
 
-    if "phpmyadmin" in path or "phpinfo" in path:
-        return 0.92
+    if organically_discovered and ("phpmyadmin" in path or "phpinfo" in path):
+        score = max(score, 0.88)
 
     if path.startswith("/dashboard/") and "phpinfo" not in path:
         return 0.12
@@ -246,8 +252,20 @@ def priority_for_score(score: float) -> float:
     return round(0.45 + score * 0.55, 2)
 
 
-def should_queue_path(url: str, *, title: str = "", page_context: str = "", min_score: float = 0.4) -> bool:
-    return score_path(url, title=title, page_context=page_context) >= min_score
+def should_queue_path(
+    url: str,
+    *,
+    title: str = "",
+    page_context: str = "",
+    min_score: float = 0.4,
+    organically_discovered: bool = False,
+) -> bool:
+    return score_path(
+        url,
+        title=title,
+        page_context=page_context,
+        organically_discovered=organically_discovered,
+    ) >= min_score
 
 
 def detect_default_stack_landing(
@@ -287,4 +305,3 @@ def summarize_page_content(title: str, body: str, *, limit: int = 400) -> str:
         stripped = re.sub(r"\s+", " ", stripped).strip()
         snippet = stripped[:limit]
     return snippet[:limit]
-
