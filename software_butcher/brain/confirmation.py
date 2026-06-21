@@ -47,6 +47,23 @@ def collect_observed_evidence(finding: Finding) -> list[str]:
     return observed
 
 
+def _is_content_intel_only(finding: Finding) -> bool:
+    """Content-read findings must not auto-confirm from convergence alone."""
+    meta = finding.metadata or {}
+    capability = str(meta.get("capability", "")).lower()
+    if meta.get("content_analysis") and capability not in {
+        "vulnerability_confirmed",
+        "auth_bypass_confirmed",
+        "exploit_generation",
+        "sql_injection_probing",
+        "rce",
+    }:
+        return True
+    if capability == "http_surface_map" and finding.provenance.startswith("http_surface:"):
+        return True
+    return False
+
+
 def should_confirm(finding: Finding) -> bool:
     """Decide if a finding should be promoted to confirmed."""
     if finding.status == "dismissed":
@@ -60,6 +77,9 @@ def should_confirm(finding: Finding) -> bool:
 
     if finding.evidence_complete and finding.required_evidence:
         return True
+
+    if _is_content_intel_only(finding):
+        return False
 
     if finding.convergence_score >= CONVERGENCE_CONFIRM_THRESHOLD and finding.supporting_paths >= 2:
         return True

@@ -92,6 +92,23 @@ _SCANNER_CAPABILITIES = frozenset({
     "fingerprint",
 })
 
+# Exploit-phase capabilities blocked until host + URL content analysis completes.
+_EXPLOIT_CAPABILITIES = _SCANNER_CAPABILITIES | frozenset({
+    "sql_injection_probing",
+    "xss_scanning",
+    "cms_scanning",
+    "exploit_generation",
+    "credential_attack",
+    "api_fuzzing",
+    "web_behavior_analysis",
+    "authenticated_discovery",
+    "ai_attack_chain",
+})
+
+_FORM_REQUIRED_CAPABILITIES = frozenset({
+    "sql_injection_probing",
+})
+
 
 def _host_findings(store: FindingStore, host: str) -> list[Finding]:
     if not host:
@@ -100,10 +117,52 @@ def _host_findings(store: FindingStore, host: str) -> list[Finding]:
     return [f for f in store.findings.values() if host_key(f.path).lower() == host_l]
 
 
+def _normalize_url(url: str) -> str:
+    return (url or "").rstrip("/").lower()
+
+
 def _host_has_content_intel(store: FindingStore, host: str) -> bool:
     for finding in _host_findings(store, host):
         if (finding.metadata or {}).get("content_analysis"):
             return True
+    return False
+
+
+def _url_has_content_map(store: FindingStore, host: str, target_url: str) -> bool:
+    """True when this specific URL was http_surface_mapped with content intel."""
+    target = _normalize_url(target_url)
+    if not target:
+        return False
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        if _normalize_url(finding.path) == target and meta.get("content_analysis"):
+            return True
+        if _normalize_url(str(meta.get("mapped_target") or "")) == target and meta.get("content_analysis"):
+            return True
+        for page in meta.get("content_pages") or []:
+            if _normalize_url(str(page.get("url") or "")) == target:
+                return True
+    return False
+
+
+def _url_has_forms(store: FindingStore, host: str, target_url: str) -> bool:
+    """True when content intel confirmed forms or input parameters on this URL."""
+    target = _normalize_url(target_url)
+    if not target:
+        return False
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        if _normalize_url(finding.path) == target:
+            if meta.get("form_count") or meta.get("form_fields"):
+                return True
+            if any("form" in str(c).lower() for c in (meta.get("conclusions") or [])):
+                return True
+        for page in meta.get("content_pages") or []:
+            if _normalize_url(str(page.get("url") or "")) == target:
+                if page.get("form_count") or page.get("form_fields"):
+                    return True
+                if any("form" in str(c).lower() for c in (page.get("conclusions") or [])):
+                    return True
     return False
 
 
@@ -334,7 +393,7 @@ def _apply_scanner_gate(
     hypothesis,
     decision: PolicyDecision,
 ) -> PolicyDecision:
-    """Block generic HexStrike scanners until headers and page content are analyzed."""
+    """Block exploit scanners until host and target URL content analysis completes."""
     if decision.asset.asset_type not in {"web_endpoint", "api", "domain", "unknown"}:
         return decision
 
@@ -342,11 +401,15 @@ def _apply_scanner_gate(
         return decision
 
     capability = str((decision.options or {}).get("capability") or decision.intent or "")
-    if capability not in _SCANNER_CAPABILITIES:
+    engagement_type = getattr(store, "_engagement_type", "assessment")
+    exploit_caps = _EXPLOIT_CAPABILITIES if engagement_type == "assessment" else _SCANNER_CAPABILITIES
+    if capability not in exploit_caps:
         return decision
 
     host = host_key(hypothesis.path)
     recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
+    target_url = hypothesis.path.rstrip("/")
+    is_host_root = _normalize_url(target_url) == _normalize_url(recon_base)
 
     if not _host_has_content_intel(store, host):
         sys.stderr.write(
@@ -368,7 +431,51 @@ def _apply_scanner_gate(
             options={"capability": "http_surface_map"},
         )
 
-    if not _host_has_application_surface(store, host) or _host_stack_landing_pending_app(store, host):
+    if not is_host_root and not _url_has_content_map(store, host, target_url):
+        sys.stderr.write(
+            f"[Brain] Scanner gate on {host}: {target_url} not content-mapped — "
+            f"http_surface_map before {capability}\n"
+        )
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=Asset(
+                locator=target_url,
+                asset_type=decision.asset.asset_type,
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="http_surface",
+            reason=(
+                f"URL {target_url} has not been http_surface_mapped with content intel — "
+                f"read page locally before {capability}."
+            ),
+            options={"capability": "http_surface_map"},
+        )
+
+    if capability in _FORM_REQUIRED_CAPABILITIES and not _url_has_forms(store, host, target_url):
+        sys.stderr.write(
+            f"[Brain] Scanner gate on {host}: no forms/parameters on {target_url} — "
+            f"content-map before {capability}\n"
+        )
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=Asset(
+                locator=target_url,
+                asset_type=decision.asset.asset_type,
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="http_surface",
+            reason=(
+                f"URL {target_url} lacks confirmed forms/parameters in content intel — "
+                f"map and analyze locally before {capability}."
+            ),
+            options={"capability": "http_surface_map"},
+        )
+
+    if engagement_type == "assessment" and (
+        not _host_has_application_surface(store, host) or _host_stack_landing_pending_app(store, host)
+    ):
         sys.stderr.write(
             f"[Brain] Scanner gate on {host}: content read but no concrete app surface — "
             f"reason locally before {capability}\n"
@@ -376,7 +483,7 @@ def _apply_scanner_gate(
         return PolicyDecision(
             intent="http_surface_map",
             asset=Asset(
-                locator=hypothesis.path if score_path(hypothesis.path) >= 0.5 else recon_base,
+                locator=target_url if score_path(hypothesis.path) >= 0.5 else recon_base,
                 asset_type=decision.asset.asset_type,
                 parent=decision.asset.parent,
                 metadata=decision.asset.metadata,

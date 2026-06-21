@@ -90,14 +90,14 @@ def test_recon_gate_blocks_nuclei_until_checklist_complete(tmp_path):
     assert gated.options["capability"] == "http_surface_map"
 
 
-def test_recon_gate_allows_nuclei_after_checklist(tmp_path):
+def test_recon_gate_allows_nuclei_after_checklist_and_url_mapped(tmp_path):
     store = FindingStore(tmp_path / "state.json")
     host = "hallbooking.srmrmp.edu.in"
     checklist = store.recon_checklist
     checklist.mark(host, "http_surface_map")
     store.ingest_finding(
         Finding(
-            path="http://hallbooking.srmrmp.edu.in/hall",
+            path="http://hallbooking.srmrmp.edu.in/dashboard",
             hypothesis="app entry",
             provenance="http_surface:content_intel",
             metadata={
@@ -123,6 +123,43 @@ def test_recon_gate_allows_nuclei_after_checklist(tmp_path):
     )
     gated = _apply_recon_gate(store, hypothesis, decision, None)
     assert gated.intent == "vulnerability_scanning"
+
+
+def test_recon_gate_blocks_nuclei_on_unmapped_child_path(tmp_path):
+    from software_butcher.brain.loop import _apply_scanner_gate
+
+    store = FindingStore(tmp_path / "state.json")
+    store.set_base_target("http://hallbooking.srmrmp.edu.in")
+    store.recon_checklist.mark("hallbooking.srmrmp.edu.in", "http_surface_map")
+    store.ingest_finding(
+        Finding(
+            path="http://hallbooking.srmrmp.edu.in",
+            hypothesis="root map",
+            provenance="http_surface:map",
+            metadata={
+                "content_analysis": True,
+                "capability": "http_surface_map",
+                "mapped_target": "http://hallbooking.srmrmp.edu.in",
+                "stack_landing": {"detected": True},
+            },
+        )
+    )
+
+    hypothesis = Hypothesis(
+        path="http://hallbooking.srmrmp.edu.in/dashboard",
+        reason="test",
+        source_finding_id="x",
+    )
+    decision = PolicyDecision(
+        intent="vulnerability_scanning",
+        asset=Asset(locator=hypothesis.path, asset_type="web_endpoint"),
+        preferred_adapter="hexstrike",
+        reason="LLM wants nuclei",
+        options={"capability": "vulnerability_scanning"},
+    )
+    gated = _apply_scanner_gate(store, hypothesis, decision)
+    assert gated.intent == "http_surface_map"
+    assert gated.options["capability"] == "http_surface_map"
 
 
 def test_policy_starts_web_targets_with_surface_map():

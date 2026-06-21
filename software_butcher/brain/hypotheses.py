@@ -33,7 +33,7 @@ class HypothesisGenerator:
     BINARY_SIGNALS = ("crash", "overflow", "strcpy", "memcpy", "gets", "format string")
 
     # ── NEW signal sets ────────────────────────────────────────────────────
-    SQLI_SIGNALS = ("sql", "mysql", "database error", "syntax error", "union select", "injection")
+    SQLI_SIGNALS = ("database error", "syntax error", "union select", "sql injection", "sqlmap")
     CLOUD_SIGNALS = ("aws", "azure", "gcp", "s3", "ec2", "iam", "cloudtrail")
     CONTAINER_SIGNALS = ("docker", "kubernetes", "k8s", "container", "pod", "kubelet")
     CREDENTIAL_SIGNALS = ("password", "hash", "ntlm", "bcrypt", "credential", "brute")
@@ -133,17 +133,18 @@ class HypothesisGenerator:
                 )
             )
 
-        # ── NEW: SQL injection escalation ────────────────────────────────
-        if finding.asset_type in {"web_endpoint", "api"} and any(signal in text for signal in self.SQLI_SIGNALS):
-            generated.append(
-                Hypothesis(
-                    path=finding.path,
-                    reason="SQL/database signals detected — SQLMap probing recommended.",
-                    source_finding_id=finding.id,
-                    priority=0.85,
-                    metadata={"intent": "sql_injection_probing", "asset_type": finding.asset_type},
+        # ── NEW: SQL injection escalation (requires confirmed forms in content intel) ──
+        if finding.asset_type in {"web_endpoint", "api"} and self._has_actionable_forms(finding):
+            if any(signal in text for signal in self.SQLI_SIGNALS):
+                generated.append(
+                    Hypothesis(
+                        path=finding.path,
+                        reason="SQL/database signals with confirmed forms — SQLMap probing recommended.",
+                        source_finding_id=finding.id,
+                        priority=0.85,
+                        metadata={"intent": "sql_injection_probing", "asset_type": finding.asset_type},
+                    )
                 )
-            )
 
         # ── NEW: XSS escalation ──────────────────────────────────────────
         if finding.asset_type in {"web_endpoint", "api"} and any(signal in text for signal in self.XSS_SIGNALS):
@@ -352,6 +353,21 @@ class HypothesisGenerator:
                 )
 
         return generated
+
+    @staticmethod
+    def _has_actionable_forms(finding: Finding) -> bool:
+        """True when content intel shows forms or input parameters on this finding or nested pages."""
+        meta = finding.metadata or {}
+        if meta.get("form_count") or meta.get("form_fields"):
+            return True
+        if any("form" in str(c).lower() for c in (meta.get("conclusions") or [])):
+            return True
+        for page in meta.get("content_pages") or []:
+            if page.get("form_count") or page.get("form_fields"):
+                return True
+            if any("form" in str(c).lower() for c in (page.get("conclusions") or [])):
+                return True
+        return False
 
     @staticmethod
     def _finding_text(finding: Finding) -> str:

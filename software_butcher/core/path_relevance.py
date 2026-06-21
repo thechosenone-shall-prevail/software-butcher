@@ -227,6 +227,9 @@ def score_path(url: str, *, title: str = "", page_context: str = "") -> float:
     if path.rstrip("/") == "/dashboard":
         return 0.15
 
+    if "phpmyadmin" in path or "phpinfo" in path:
+        return 0.92
+
     if path.startswith("/dashboard/") and "phpinfo" not in path:
         return 0.12
 

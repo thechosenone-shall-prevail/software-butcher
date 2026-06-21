@@ -218,7 +218,7 @@ def test_xampp_landing_does_not_probe_hardcoded_admin_paths(mock_cache, mock_fol
 
     xampp_html = (
         '<html><head><title>Welcome to XAMPP</title></head>'
-        '<body>XAMPP for Linux — phpMyAdmin available.</body></html>'
+        '<body>XAMPP for Linux — Apache Friends dashboard.</body></html>'
     )
     response = _resp(
         "http://example.com/dashboard/",
@@ -236,3 +236,56 @@ def test_xampp_landing_does_not_probe_hardcoded_admin_paths(mock_cache, mock_fol
 
     admin_probes = [p for p in surface.get("semantic_probes") or [] if p.get("admin_probe")]
     assert len(admin_probes) == 0
+
+
+@patch("software_butcher.shelves.web.http_surface.browser_navigate")
+@patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.follow_redirects")
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.probe_cache_behavior", return_value={})
+def test_xampp_organic_links_fetch_phpmyadmin_and_phpinfo(mock_cache, mock_follow, _mock_well_known, _mock_browser):
+    """XAMPP dashboard links to phpMyAdmin/phpinfo should be fetched and content-analyzed."""
+    _mock_browser.return_value = MagicMock(
+        success=False, final_url="", title="", redirect_chain=[], discovered_urls=[], error="disabled",
+    )
+    _mock_browser.return_value.to_dict.return_value = {}
+
+    xampp_html = (
+        '<html><head><title>Welcome to XAMPP</title></head><body>'
+        'XAMPP for Linux — <a href="/phpmyadmin/">phpMyAdmin</a> '
+        '<a href="/dashboard/phpinfo.php">phpinfo</a></body></html>'
+    )
+    root_resp = _resp(
+        "http://example.com/dashboard/",
+        body=xampp_html,
+        headers={"Server": "Apache"},
+    )
+    phpmyadmin_resp = _resp(
+        "http://example.com/phpmyadmin",
+        body='<html><head><title>phpMyAdmin</title></head><body><form><input name="pma_username">phpMyAdmin mysqli</form></body></html>',
+    )
+    phpinfo_resp = _resp(
+        "http://example.com/dashboard/phpinfo.php",
+        body="<html><body><h1>PHP Version</h1>phpinfo() Configuration PHP Core</body></html>",
+        headers={"X-Powered-By": "PHP/7.4.33"},
+    )
+
+    def follow_side_effect(url, *args, **kwargs):
+        u = url.rstrip("/").lower()
+        if u.endswith("/phpmyadmin") or u.endswith("/phpmyadmin/"):
+            return phpmyadmin_resp
+        if "phpinfo" in u:
+            return phpinfo_resp
+        return root_resp
+
+    mock_follow.side_effect = follow_side_effect
+
+    surface = map_http_surface("http://example.com", use_browser=False)
+    page_types = {p.get("page_type") for p in surface.get("content_pages") or []}
+    assert "phpmyadmin" in page_types
+    assert "phpinfo" in page_types
+
+    findings = HttpSurfaceAdapter._findings_from_surface(surface, "web_endpoint")
+    content_findings = [f for f in findings if f.get("provenance") == "http_surface:content_intel"]
+    content_types = {f["metadata"].get("page_type") for f in content_findings}
+    assert "phpmyadmin" in content_types
+    assert "phpinfo" in content_types

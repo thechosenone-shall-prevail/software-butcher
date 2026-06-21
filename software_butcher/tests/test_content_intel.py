@@ -103,6 +103,22 @@ def test_scanner_gate_blocks_until_content_analysis(tmp_path):
         )
     )
     assert _host_has_content_intel(store, "example.com") is True
+    # Root has content intel but /admin is not yet mapped — still gate to surface map
+    gated_child = _apply_scanner_gate(store, hypothesis, decision)
+    assert gated_child.options["capability"] == "http_surface_map"
+
+    store.ingest_finding(
+        Finding(
+            path="http://example.com/admin",
+            hypothesis="admin mapped",
+            provenance="http_surface:content_intel",
+            metadata={
+                "content_analysis": True,
+                "form_count": 1,
+                "conclusions": ["Page has 1 form(s) with fields ['user']"],
+            },
+        )
+    )
     allowed = _apply_scanner_gate(store, hypothesis, decision)
     assert allowed.options["capability"] == "directory_bruteforce"
 
@@ -135,5 +151,73 @@ def test_scanner_gate_blocks_nuclei_without_application_surface(tmp_path):
         options={"capability": "vulnerability_scanning"},
     )
     hypothesis = Hypothesis(path="http://example.com", reason="scan", source_finding_id="t")
+    gated = _apply_scanner_gate(store, hypothesis, decision)
+    assert gated.options["capability"] == "http_surface_map"
+
+
+def test_scanner_gate_blocks_endpoint_discovery_on_unmapped_path(tmp_path):
+    store = FindingStore(tmp_path / "state.json")
+    store.set_base_target("http://hallbooking.srmrmp.edu.in")
+    store.recon_checklist.mark("hallbooking.srmrmp.edu.in", "http_surface_map")
+    store.ingest_finding(
+        Finding(
+            path="http://hallbooking.srmrmp.edu.in",
+            hypothesis="root map",
+            provenance="http_surface:map",
+            metadata={
+                "content_analysis": True,
+                "capability": "http_surface_map",
+                "mapped_target": "http://hallbooking.srmrmp.edu.in",
+                "stack_landing": {"detected": True, "stack": "xampp_default"},
+            },
+        )
+    )
+    hypothesis = Hypothesis(
+        path="http://hallbooking.srmrmp.edu.in/hallbooking",
+        reason="discover",
+        source_finding_id="test",
+        metadata={"asset_type": "web_endpoint"},
+    )
+    decision = PolicyDecision(
+        intent="endpoint_discovery",
+        asset=Asset(locator=hypothesis.path, asset_type="web_endpoint"),
+        preferred_adapter="hexstrike",
+        reason="test",
+        options={"capability": "endpoint_discovery"},
+    )
+    gated = _apply_scanner_gate(store, hypothesis, decision)
+    assert gated.options["capability"] == "http_surface_map"
+    assert gated.preferred_adapter == "http_surface"
+
+
+def test_scanner_gate_blocks_sqli_without_forms(tmp_path):
+    store = FindingStore(tmp_path / "state.json")
+    store.set_base_target("http://hallbooking.srmrmp.edu.in")
+    store.recon_checklist.mark("hallbooking.srmrmp.edu.in", "http_surface_map")
+    store.ingest_finding(
+        Finding(
+            path="http://hallbooking.srmrmp.edu.in/hall",
+            hypothesis="mapped hall",
+            provenance="http_surface:content_intel",
+            metadata={
+                "content_analysis": True,
+                "page_type": "html",
+                "mysql_signals": ["mysqli"],
+                "conclusions": ["MySQL/database signals in content"],
+            },
+        )
+    )
+    hypothesis = Hypothesis(
+        path="http://hallbooking.srmrmp.edu.in/hall",
+        reason="sqli",
+        source_finding_id="test",
+    )
+    decision = PolicyDecision(
+        intent="sql_injection_probing",
+        asset=Asset(locator=hypothesis.path, asset_type="web_endpoint"),
+        preferred_adapter="hexstrike",
+        reason="test",
+        options={"capability": "sql_injection_probing"},
+    )
     gated = _apply_scanner_gate(store, hypothesis, decision)
     assert gated.options["capability"] == "http_surface_map"
