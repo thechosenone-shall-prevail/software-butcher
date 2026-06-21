@@ -3,7 +3,9 @@
 from software_butcher.brain.context import build_brain_context
 from software_butcher.core.app_root import (
     app_root_pending_urls,
+    app_scope_work_pending,
     application_scope_priority_boost,
+    assessment_serializes_branches,
     infer_application_root,
     is_stack_host_surface,
 )
@@ -88,3 +90,22 @@ def test_app_root_pending_urls_and_priority_boost():
     assert application_scope_priority_boost(app_hyp, app_root, findings) > application_scope_priority_boost(
         stack_hyp, app_root, findings
     )
+
+
+def test_assessment_serializes_while_app_work_pending():
+    finding = Finding(
+        hypothesis="surface map",
+        path="http://example.edu/hall",
+        provenance="http_surface:map",
+        metadata={
+            "content_pages": [{"url": "http://example.edu/hall/index.php", "form_count": 1}],
+            "app_expand": {"expanded_urls": ["http://example.edu/hall/admin.php"]},
+        },
+    )
+    app_root = infer_application_root([finding], base_target="http://example.edu/hall/")
+    assert app_root is not None
+    serial, reason = assessment_serializes_branches(app_root, [finding], engagement_type="assessment")
+    assert serial is True
+    assert "unmapped" in reason
+    maps, redirects = app_scope_work_pending([finding], app_root)
+    assert "http://example.edu/hall/admin.php" in maps

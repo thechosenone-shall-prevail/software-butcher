@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from software_butcher.core.app_root import ApplicationRoot, finding_drives_pcs_branching
+from software_butcher.core.app_root import ApplicationRoot, assessment_serializes_branches, finding_drives_pcs_branching
 from software_butcher.state.schema import ConvergenceCluster, Finding
 
 
@@ -72,6 +72,16 @@ class ProgressiveConvergenceSearch:
         all_findings: list[Finding] | None = None,
     ) -> tuple[int, str]:
         """Return (branch_count, reason) for the next Brain step."""
+        findings_list = list(all_findings or [])
+        serialize, serialize_reason = assessment_serializes_branches(
+            app_root,
+            findings_list,
+            engagement_type=engagement_type,
+        )
+        if serialize:
+            self.state.active_branches = 1
+            return 1, serialize_reason
+
         if self.state.validation_mode:
             if not recon_complete:
                 self.state.validation_mode = False
@@ -110,11 +120,23 @@ class ProgressiveConvergenceSearch:
             engagement_type=engagement_type,
             all_findings=all_findings,
         ):
+            serial, reason = assessment_serializes_branches(
+                app_root, findings_list, engagement_type=engagement_type
+            )
+            if serial:
+                self.state.active_branches = 1
+                return 1, reason
             self.state.active_branches = min(MAX_BRANCHES, SPAWN_ON_EVIDENCE)
             self.state.total_spawned = max(self.state.total_spawned, self.state.active_branches)
             return self.state.active_branches, "evidence_triggered: high-value finding spawned branches"
 
         if self._conflicting_themes(clusters, new_findings):
+            serial, reason = assessment_serializes_branches(
+                app_root, findings_list, engagement_type=engagement_type
+            )
+            if serial:
+                self.state.active_branches = 1
+                return 1, reason
             proposed = min(MAX_BRANCHES, self.state.active_branches + SPAWN_ON_CONFLICT)
             self.state.active_branches = proposed
             self.state.total_spawned = max(self.state.total_spawned, proposed)

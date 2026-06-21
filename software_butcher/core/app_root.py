@@ -253,6 +253,15 @@ def _discovered_app_urls(findings: Iterable[Finding], app_root: ApplicationRoot)
                 discovered.add(_normalize(url_s))
         if url_under_application_root(finding.path, app_root):
             discovered.add(_normalize(finding.path))
+        for url in meta.get("discovered_urls") or []:
+            url_s = str(url)
+            if url_under_application_root(url_s, app_root):
+                discovered.add(_normalize(url_s))
+        for item in meta.get("scored_urls") or []:
+            if isinstance(item, dict):
+                url_s = str(item.get("url") or "")
+                if url_under_application_root(url_s, app_root):
+                    discovered.add(_normalize(url_s))
     return discovered
 
 
@@ -447,6 +456,91 @@ def hypothesis_in_application_scope(
             return False
 
     return True
+
+
+def app_root_redirect_audits_pending(
+    findings: Iterable[Finding],
+    app_root: ApplicationRoot,
+) -> list[str]:
+    """App pages with redirect-body leak signals but no redirect_body_audit yet."""
+    pending: list[str] = []
+    for finding in findings:
+        meta = finding.metadata or {}
+        for page in meta.get("content_pages") or []:
+            page_url = str(page.get("url") or "")
+            if not url_under_application_root(page_url, app_root):
+                continue
+            leak = bool(page.get("redirect_body_leak_suspected")) or any(
+                entry.get("leak_suspected")
+                for entry in as_dict_list(page.get("redirect_observations"))
+            )
+            if not leak:
+                continue
+            if not _capability_observed_on_url(findings, page_url, "redirect_body_audit"):
+                pending.append(page_url)
+    return sorted(set(pending))
+
+
+def _capability_observed_on_url(
+    findings: Iterable[Finding],
+    url: str,
+    capability: str,
+) -> bool:
+    target = _normalize(url)
+    cap = capability.strip()
+    for finding in findings:
+        meta = finding.metadata or {}
+        observed = str(meta.get("capability") or "")
+        if observed != cap:
+            continue
+        if _normalize(finding.path) == target or _normalize(str(meta.get("mapped_target") or "")) == target:
+            return True
+    return False
+
+
+def app_scope_work_pending(
+    findings: Iterable[Finding],
+    app_root: ApplicationRoot,
+) -> tuple[list[str], list[str]]:
+    """Return (unmapped_app_urls, redirect_audit_urls) still needing work."""
+    maps = app_root_pending_urls(findings, app_root)
+    redirects = app_root_redirect_audits_pending(findings, app_root)
+    return maps, redirects
+
+
+def assessment_serializes_branches(
+    app_root: ApplicationRoot | None,
+    findings: Iterable[Finding],
+    *,
+    engagement_type: str = "assessment",
+) -> tuple[bool, str]:
+    """Single-branch PCS while app-subtree mapping or redirect audits remain."""
+    if engagement_type != "assessment" or app_root is None or app_root.confidence < 0.55:
+        return False, ""
+    pending_maps, pending_redirects = app_scope_work_pending(findings, app_root)
+    if not pending_maps and not pending_redirects:
+        return False, ""
+    return (
+        True,
+        f"app_scope_serialize: {len(pending_maps)} unmapped app URL(s), "
+        f"{len(pending_redirects)} redirect audit(s) pending",
+    )
+
+
+def hypothesis_matches_app_focus(
+    hypothesis: Hypothesis,
+    app_root: ApplicationRoot,
+    findings: dict[str, Finding],
+) -> bool:
+    """When app work is pending, only pop hypotheses that advance the app subtree."""
+    if url_under_application_root(hypothesis.path, app_root):
+        return True
+    meta = hypothesis.metadata or {}
+    if str(meta.get("generated_by") or "") == "redirect_audit":
+        return url_under_application_root(hypothesis.path, app_root)
+    if str(meta.get("intent") or "") == "redirect_body_audit":
+        return url_under_application_root(hypothesis.path, app_root)
+    return False
 
 
 def application_scope_priority_boost(

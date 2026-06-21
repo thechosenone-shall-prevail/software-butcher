@@ -7,8 +7,11 @@ from typing import TYPE_CHECKING
 
 from software_butcher.core.app_root import (
     application_scope_priority_boost,
+    assessment_serializes_branches,
     hypothesis_in_application_scope,
+    hypothesis_matches_app_focus,
     infer_application_root,
+    app_scope_work_pending,
 )
 from software_butcher.core.path_relevance import hypothesis_has_evidence_lineage
 from software_butcher.core.url_utils import canonical_web_url, is_plausible_target_path
@@ -157,6 +160,21 @@ class HypothesisQueue:
             _prune()
         return removed
 
+    def _focused_pending(self, pending: list[Hypothesis]) -> list[Hypothesis]:
+        findings = self._findings or {}
+        app_root = infer_application_root(findings.values(), self._base_target)
+        if self._engagement_type != "assessment" or app_root is None or app_root.confidence < 0.55:
+            return pending
+        pending_maps, pending_redirects = app_scope_work_pending(findings.values(), app_root)
+        if not pending_maps and not pending_redirects:
+            return pending
+        focused = [
+            hyp
+            for hyp in pending
+            if hypothesis_matches_app_focus(hyp, app_root, findings)
+        ]
+        return focused if focused else pending
+
     def _effective_priority(self, hypothesis: Hypothesis) -> float:
         findings = self._findings or {}
         app_root = infer_application_root(findings.values(), self._base_target)
@@ -171,6 +189,7 @@ class HypothesisQueue:
 
     def _next_unlocked(self) -> Hypothesis | None:
         pending = [item for item in self._items.values() if item.status == "pending"]
+        pending = self._focused_pending(pending)
         if not pending:
             return None
         item = sorted(pending, key=lambda hyp: (-self._effective_priority(hyp), hyp.created_at))[0]
@@ -197,8 +216,10 @@ class HypothesisQueue:
         return self._pending_list_unlocked()
 
     def _pending_list_unlocked(self) -> list[Hypothesis]:
+        pending = [item for item in self._items.values() if item.status == "pending"]
+        pending = self._focused_pending(pending)
         return sorted(
-            [item for item in self._items.values() if item.status == "pending"],
+            pending,
             key=lambda hyp: (-self._effective_priority(hyp), hyp.created_at),
         )
 

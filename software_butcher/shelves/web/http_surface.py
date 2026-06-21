@@ -362,6 +362,9 @@ def map_http_surface(
         or chain_leak_suspected(assessment_get.redirect_chain)
         or chain_leak_suspected(browser_hops)
     )
+    if redirect_body_leak_suspected and root_content.get("url"):
+        root_content["redirect_body_leak_suspected"] = True
+        root_content["redirect_observations"] = redirect_observations
 
     scored_urls: list[dict[str, Any]] = []
     prioritized: list[str] = []
