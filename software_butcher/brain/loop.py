@@ -81,21 +81,74 @@ _SCANNER_CAPABILITIES = frozenset({
     "directory_bruteforce",
     "bugbounty_recon",
     "bugbounty_osint",
+    "bugbounty_comprehensive",
     "technology_fingerprint",
     "vulnerability_scanning",
+    "continue_discovery",
+    "discover",
+    "enrich",
+    "fingerprint",
 })
 
 
-def _host_has_content_intel(store: FindingStore, host: str) -> bool:
+def _host_findings(store: FindingStore, host: str) -> list[Finding]:
     if not host:
-        return False
+        return []
     host_l = host.lower()
-    for finding in store.findings.values():
-        if host_key(finding.path).lower() != host_l:
-            continue
+    return [f for f in store.findings.values() if host_key(f.path).lower() == host_l]
+
+
+def _host_has_content_intel(store: FindingStore, host: str) -> bool:
+    for finding in _host_findings(store, host):
         if (finding.metadata or {}).get("content_analysis"):
             return True
     return False
+
+
+def _host_has_application_surface(store: FindingStore, host: str) -> bool:
+    """True when content analysis found forms, phpMyAdmin/phpinfo, or high-value app paths."""
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        if not meta.get("content_analysis"):
+            continue
+        page_type = str(meta.get("page_type") or "")
+        if page_type in {"phpinfo", "phpmyadmin"}:
+            return True
+        conclusions = meta.get("conclusions") or []
+        if any("form" in str(c).lower() for c in conclusions):
+            return True
+        if meta.get("mysql_signals") or meta.get("form_count"):
+            return True
+        if score_path(finding.path) >= 0.85:
+            return True
+        content_pages = meta.get("content_pages") or []
+        for page in content_pages:
+            if str(page.get("page_type") or "") in {"phpinfo", "phpmyadmin"}:
+                return True
+            if page.get("form_count") or page.get("mysql_signals"):
+                return True
+    return False
+
+
+def _host_stack_landing_pending_app(store: FindingStore, host: str) -> bool:
+    """XAMPP/default stack detected but no concrete application entry mapped yet."""
+    stack_detected = False
+    has_app_entry = False
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        stack = (meta.get("stack_landing") or {})
+        if stack.get("detected"):
+            stack_detected = True
+        if meta.get("semantic_probes"):
+            for probe in meta["semantic_probes"]:
+                if probe.get("reachable"):
+                    has_app_entry = True
+        if score_path(finding.path) >= 0.85 and not is_noise_path(finding.path):
+            has_app_entry = True
+        page_type = str(meta.get("page_type") or "")
+        if page_type in {"phpinfo", "phpmyadmin"}:
+            has_app_entry = True
+    return stack_detected and not has_app_entry
 
 
 def _asset_from_hypothesis(hypothesis, fallback_asset: Asset | None = None) -> Asset:
@@ -227,6 +280,41 @@ def _apply_path_relevance_gate(
     return decision
 
 
+def _apply_local_analysis_gate(
+    store: FindingStore,
+    hypothesis,
+    decision: PolicyDecision,
+) -> PolicyDecision:
+    """Prefer local http_surface over HexStrike for content-intel follow-ups."""
+    if (decision.options or {}).get("skip_execute"):
+        return decision
+
+    capability = str((decision.options or {}).get("capability") or decision.intent or "")
+    if capability != "web_behavior_analysis":
+        return decision
+
+    meta = hypothesis.metadata or {}
+    if meta.get("generated_by") in {"content_intel", "mysql_resource_intel", "domain_semantics"}:
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=decision.asset,
+            preferred_adapter="http_surface",
+            reason="Content-intel hypothesis — map and analyze locally instead of HexStrike web_behavior_analysis.",
+            options={"capability": "http_surface_map"},
+        )
+
+    page_type = str(meta.get("page_type") or "")
+    if page_type in {"phpinfo", "phpmyadmin"} or meta.get("analysis_focus") == "resource_exhaustion":
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=decision.asset,
+            preferred_adapter="http_surface",
+            reason=f"Page type {page_type or 'mysql'} warrants local content analysis, not remote behavior scan.",
+            options={"capability": "http_surface_map"},
+        )
+    return decision
+
+
 def _apply_scanner_gate(
     store: FindingStore,
     hypothesis,
@@ -244,28 +332,50 @@ def _apply_scanner_gate(
         return decision
 
     host = host_key(hypothesis.path)
-    if _host_has_content_intel(store, host):
-        return decision
-
     recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
-    sys.stderr.write(
-        f"[Brain] Scanner gate on {host}: read headers and page content before {capability}\n"
-    )
-    return PolicyDecision(
-        intent="http_surface_map",
-        asset=Asset(
-            locator=recon_base,
-            asset_type=decision.asset.asset_type,
-            parent=decision.asset.parent,
-            metadata=decision.asset.metadata,
-        ),
-        preferred_adapter="http_surface",
-        reason=(
-            f"Host {host} lacks content_analysis findings — map headers and view-source "
-            f"before {capability}."
-        ),
-        options={"capability": "http_surface_map"},
-    )
+
+    if not _host_has_content_intel(store, host):
+        sys.stderr.write(
+            f"[Brain] Scanner gate on {host}: read headers and page content before {capability}\n"
+        )
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=Asset(
+                locator=recon_base,
+                asset_type=decision.asset.asset_type,
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="http_surface",
+            reason=(
+                f"Host {host} lacks content_analysis findings — map headers and view-source "
+                f"before {capability}."
+            ),
+            options={"capability": "http_surface_map"},
+        )
+
+    if not _host_has_application_surface(store, host) or _host_stack_landing_pending_app(store, host):
+        sys.stderr.write(
+            f"[Brain] Scanner gate on {host}: content read but no concrete app surface — "
+            f"reason locally before {capability}\n"
+        )
+        return PolicyDecision(
+            intent="http_surface_map",
+            asset=Asset(
+                locator=hypothesis.path if score_path(hypothesis.path) >= 0.5 else recon_base,
+                asset_type=decision.asset.asset_type,
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="http_surface",
+            reason=(
+                f"Host {host} has stack/content intel but no confirmed application entry — "
+                f"continue local analysis instead of {capability}."
+            ),
+            options={"capability": "http_surface_map"},
+        )
+
+    return decision
 
 
 def _findings_from_adapter_result(
@@ -507,6 +617,7 @@ def run_brain_once(
 
     decision = _apply_recon_gate(store, hypothesis, decision, explicit_intent)
     decision = _apply_path_relevance_gate(store, hypothesis, decision)
+    decision = _apply_local_analysis_gate(store, hypothesis, decision)
     decision = _apply_scanner_gate(store, hypothesis, decision)
 
     route = _route_for_decision(decision, router)

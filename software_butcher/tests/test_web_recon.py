@@ -95,6 +95,19 @@ def test_recon_gate_allows_nuclei_after_checklist(tmp_path):
     host = "hallbooking.srmrmp.edu.in"
     checklist = store.recon_checklist
     checklist.mark(host, "http_surface_map")
+    store.ingest_finding(
+        Finding(
+            path="http://hallbooking.srmrmp.edu.in/hall",
+            hypothesis="app entry",
+            provenance="http_surface:content_intel",
+            metadata={
+                "content_analysis": True,
+                "page_type": "html",
+                "form_count": 1,
+                "conclusions": ["Page has 1 form(s) with fields ['user']"],
+            },
+        )
+    )
 
     hypothesis = Hypothesis(
         path="http://hallbooking.srmrmp.edu.in/dashboard",

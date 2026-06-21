@@ -40,3 +40,25 @@ def test_privesc_generates_flag_hypothesis():
     state = EngagementState(phase="privesc")
     hyps = phase_hypotheses(state, "http://10.10.11.1")
     assert any("root.txt" in h.path for h in hyps)
+
+
+def test_web_portal_does_not_spawn_user_txt(tmp_path):
+    state = EngagementState(phase="foothold")
+    hyps = phase_hypotheses(state, "http://hallbooking.srmrmp.edu.in")
+    assert not any("user.txt" in h.path for h in hyps)
+
+
+def test_phpmyadmin_form_does_not_trigger_foothold():
+    state = EngagementState()
+    findings = [
+        Finding(
+            hypothesis="Content analysis (phpmyadmin)",
+            path="http://hallbooking.srmrmp.edu.in/phpmyadmin/",
+            provenance="http_surface:content_intel",
+            evidence=["fields=['pma_username', 'pma_password']"],
+            metadata={"content_analysis": True, "page_type": "phpmyadmin"},
+        )
+    ]
+    state = infer_phase(findings, state)
+    assert state.phase == "recon"
+    assert state.user_flag is None

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from software_butcher.core.asset_classifier import is_static_asset
 from software_butcher.core.domain_semantics import semantic_path_candidates
-from software_butcher.core.path_relevance import is_noise_path, score_path
+from software_butcher.core.path_relevance import is_hypothesis_path_allowed, is_noise_path, score_path
 from software_butcher.core.url_utils import base_web_url
 from software_butcher.state.path_graph import parent_path
 from software_butcher.state.schema import Finding, Hypothesis
@@ -212,20 +212,28 @@ class HypothesisGenerator:
                 if not url or is_noise_path(url):
                     continue
                 page_type = str(page.get("page_type") or "html")
+                conclusions = list(page.get("conclusions") or [])
+                mysql_signals = list(page.get("mysql_signals") or [])
+                has_resource_exhaustion = any(
+                    "resource exhaustion" in c.lower() or "db connection" in c.lower()
+                    for c in conclusions
+                )
+
                 if page_type in ("phpinfo", "phpmyadmin"):
                     generated.append(
                         Hypothesis(
                             path=url,
                             reason=(
-                                f"{page_type} reachable — analyze login, disclosure, and session behavior "
-                                "before generic scanners."
+                                f"{page_type} reachable — read login, disclosure, and session behavior locally "
+                                "before any HexStrike scanner."
                             ),
                             source_finding_id=finding.id,
                             priority=0.99,
                             metadata={
-                                "intent": "web_behavior_analysis",
+                                "intent": "http_surface_map",
                                 "asset_type": "web_endpoint",
                                 "generated_by": "content_intel",
+                                "page_type": page_type,
                             },
                         )
                     )
@@ -234,15 +242,34 @@ class HypothesisGenerator:
                         Hypothesis(
                             path=url,
                             reason=(
-                                "Application entry identified from content read — analyze forms, auth, "
-                                "and dynamic behavior before scanners."
+                                "Application entry identified from content read — map forms, auth, "
+                                "and dynamic behavior locally before scanners."
                             ),
                             source_finding_id=finding.id,
                             priority=0.92,
                             metadata={
-                                "intent": "web_behavior_analysis",
+                                "intent": "http_surface_map",
                                 "asset_type": "web_endpoint",
                                 "generated_by": "content_intel",
+                            },
+                        )
+                    )
+
+                if page_type == "phpmyadmin" or mysql_signals or has_resource_exhaustion:
+                    generated.append(
+                        Hypothesis(
+                            path=url,
+                            reason=(
+                                "MySQL/phpMyAdmin stack with backend DB on each request — reason about "
+                                "connection pool exhaustion and auth on phpMyAdmin (not gobuster/nuclei)."
+                            ),
+                            source_finding_id=finding.id,
+                            priority=0.97,
+                            metadata={
+                                "intent": "http_surface_map",
+                                "asset_type": "web_endpoint",
+                                "generated_by": "mysql_resource_intel",
+                                "analysis_focus": "resource_exhaustion",
                             },
                         )
                     )
@@ -252,6 +279,8 @@ class HypothesisGenerator:
                 if url.rstrip("/").lower() in analyzed_urls:
                     continue
                 if score_path(url) < 0.5:
+                    continue
+                if not is_hypothesis_path_allowed(url, metadata={"generated_by": "domain_semantics"}):
                     continue
                 generated.append(
                     Hypothesis(

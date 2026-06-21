@@ -15,6 +15,19 @@ def test_xampp_paths_are_noise():
     assert not is_noise_path("http://example.com/hall")
 
 
+def test_ctf_filesystem_paths_blocked():
+    from software_butcher.core.path_relevance import is_ctf_filesystem_path, is_hypothesis_path_allowed
+
+    assert is_ctf_filesystem_path("/home/user/user.txt")
+    assert is_ctf_filesystem_path("/root/root.txt")
+    assert is_ctf_filesystem_path("http://example.com/home/user/user.txt")
+    assert not is_hypothesis_path_allowed("/home/user/user.txt")
+    assert is_hypothesis_path_allowed(
+        "/home/user/user.txt",
+        metadata={"organically_discovered": True},
+    )
+
+
 def test_hall_scores_high():
     assert score_path("http://hallbooking.srmrmp.edu.in/hall") >= 0.9
     assert should_queue_path("http://hallbooking.srmrmp.edu.in/hall")

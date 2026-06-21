@@ -94,9 +94,46 @@ def test_scanner_gate_blocks_until_content_analysis(tmp_path):
             path="http://example.com",
             hypothesis="mapped",
             provenance="http_surface:map",
-            metadata={"content_analysis": True},
+            metadata={
+                "content_analysis": True,
+                "page_type": "html",
+                "form_count": 2,
+                "conclusions": ["Page has 2 form(s) with fields ['user'] — likely dynamic backend."],
+            },
         )
     )
     assert _host_has_content_intel(store, "example.com") is True
     allowed = _apply_scanner_gate(store, hypothesis, decision)
     assert allowed.options["capability"] == "directory_bruteforce"
+
+
+def test_scanner_gate_blocks_nuclei_without_application_surface(tmp_path):
+    from software_butcher.brain.loop import _host_has_application_surface
+
+    store = FindingStore(tmp_path / "state.json")
+    store.set_base_target("http://example.com")
+    store.ingest_finding(
+        Finding(
+            path="http://example.com",
+            hypothesis="xampp root",
+            provenance="http_surface:map",
+            metadata={
+                "content_analysis": True,
+                "stack_landing": {"detected": True, "stack": "xampp_default"},
+                "conclusions": ["XAMPP stack confirmed"],
+            },
+        )
+    )
+    assert _host_has_content_intel(store, "example.com")
+    assert not _host_has_application_surface(store, "example.com")
+
+    decision = PolicyDecision(
+        intent="vulnerability_scanning",
+        asset=Asset(locator="http://example.com", asset_type="web_endpoint"),
+        preferred_adapter="hexstrike",
+        reason="test",
+        options={"capability": "vulnerability_scanning"},
+    )
+    hypothesis = Hypothesis(path="http://example.com", reason="scan", source_finding_id="t")
+    gated = _apply_scanner_gate(store, hypothesis, decision)
+    assert gated.options["capability"] == "http_surface_map"

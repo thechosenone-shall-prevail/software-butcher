@@ -7,7 +7,18 @@ def test_hallbooking_host_yields_hall_token():
     tokens = tokens_from_host("http://hallbooking.srmrmp.edu.in")
     assert "hallbooking" in tokens
     assert "hall" in tokens
-    assert "booking" in tokens
+    assert "booking" not in tokens
+    assert "book" not in tokens
+
+
+def test_semantic_candidates_cap_substring_spray():
+    cands = semantic_path_candidates("http://hallbooking.srmrmp.edu.in")
+    urls = [c["url"] for c in cands]
+    assert len(cands) <= 3
+    assert "http://hallbooking.srmrmp.edu.in/hallbooking" in urls
+    assert "http://hallbooking.srmrmp.edu.in/book" not in urls
+    assert "http://hallbooking.srmrmp.edu.in/booking" not in urls
+    assert "http://hallbooking.srmrmp.edu.in/dashboard" not in urls
 
 
 def test_semantic_candidates_include_hall_path():

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from typing import TYPE_CHECKING
 
+from software_butcher.core.path_relevance import is_hypothesis_path_allowed
 from software_butcher.core.url_utils import canonical_web_url, is_plausible_target_path
 
 from .path_graph import parent_path
@@ -81,6 +82,8 @@ class HypothesisQueue:
             return None
         if path != hypothesis.path:
             hypothesis.path = path
+        if not is_hypothesis_path_allowed(path, metadata=hypothesis.metadata or {}):
+            return None
         return hypothesis
 
     def next(self) -> Hypothesis | None:

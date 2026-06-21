@@ -17,6 +17,12 @@ def test_brain_prompt_emphasizes_content_before_scanners():
     assert "bugbounty_osint" not in BRAIN_CAPABILITY_PROMPT.split("3.")[1].split("4.")[0]
 
 
+def test_brain_prompt_rejects_ctf_paths():
+    lowered = BRAIN_CAPABILITY_PROMPT.lower()
+    assert "user.txt" in lowered or "/home/" in lowered
+    assert "never probe ctf" in lowered or "reject ctf" in lowered
+
+
 def test_advisor_prompt_no_admin_bias():
     assert "/admin" not in ADVISOR_HYPOTHESIS_PROMPT
     assert "naming patterns" in ADVISOR_HYPOTHESIS_PROMPT.lower()
