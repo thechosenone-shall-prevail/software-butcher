@@ -461,8 +461,105 @@ def test_generator_defers_infra_when_hall_app_incomplete():
         finding,
         engagement_type="assessment",
         base_target="http://example.edu/hall/",
+        all_findings=[finding],
     )
     paths = {h.path for h in hyps}
     assert "http://example.edu/hall/admin.php" in paths
     assert any("/hall/" in p for p in paths)
     assert not any("phpinfo" in p for p in paths)
+
+
+def test_generator_defers_infra_for_child_phpinfo_finding_with_full_store():
+    from software_butcher.brain.hypotheses import HypothesisGenerator
+
+    hall_finding = _surface_finding(
+        path="http://example.edu/hall",
+        content_analysis=True,
+        content_pages=[
+            {
+                "url": "http://example.edu/hall/report.php",
+                "form_count": 0,
+                "conclusions": ["Report listing"],
+            },
+            {
+                "url": "http://example.edu/dashboard/phpinfo.php",
+                "page_type": "phpinfo",
+                "conclusions": ["PHP configuration disclosure"],
+            },
+        ],
+        app_expand={"expanded_urls": []},
+    )
+    phpinfo_finding = Finding(
+        hypothesis="Content analysis (phpinfo)",
+        path="http://example.edu/dashboard/phpinfo.php",
+        provenance="http_surface:content_intel",
+        metadata={
+            "capability": "http_surface_map",
+            "content_analysis": True,
+            "page_type": "phpinfo",
+            "conclusions": ["PHP configuration disclosure"],
+            "discovered_from": "http://example.edu/hall",
+        },
+    )
+    hyps = HypothesisGenerator().generate(
+        phpinfo_finding,
+        engagement_type="assessment",
+        base_target="http://example.edu/hall/",
+        all_findings=[hall_finding, phpinfo_finding],
+    )
+    assert not hyps
+
+
+def test_strict_scope_blocks_host_redirect_while_app_incomplete():
+    finding = _surface_finding(
+        app_expand={"expanded_urls": []},
+        content_pages=[
+            {
+                "url": "http://example.edu/hall/report.php",
+                "form_count": 0,
+                "conclusions": ["Report listing"],
+            },
+        ],
+    )
+    app_root = infer_application_root([finding], base_target="http://example.edu/hall/")
+    assert app_root is not None
+    findings = {finding.id: finding}
+    host_redirect = Hypothesis(
+        path="http://example.edu/",
+        reason="redirect audit",
+        source_finding_id=finding.id,
+        metadata={"generated_by": "redirect_audit", "intent": "redirect_body_audit"},
+    )
+    assert not hypothesis_in_application_scope(
+        host_redirect,
+        app_root,
+        findings,
+        base_target="http://example.edu/hall/",
+        engagement_type="assessment",
+    )
+
+
+def test_ensure_app_subtree_hypotheses_seeds_pending_maps():
+    from software_butcher.core.app_root import ensure_app_subtree_hypotheses
+
+    finding = _surface_finding(
+        app_expand={"expanded_urls": ["http://example.edu/hall/admin.php"]},
+        content_pages=[
+            {
+                "url": "http://example.edu/hall/report.php",
+                "form_count": 0,
+                "conclusions": ["Report listing"],
+            },
+        ],
+    )
+    app_root = infer_application_root([finding], base_target="http://example.edu/hall/")
+    assert app_root is not None
+    hyps = ensure_app_subtree_hypotheses(
+        {finding.id: finding},
+        app_root,
+        base_target="http://example.edu/hall/",
+        engagement_type="assessment",
+    )
+    paths = {h.path for h in hyps}
+    assert "http://example.edu/hall/admin.php" in paths
+    assert "http://example.edu/hall/report.php" in paths

@@ -18,7 +18,7 @@ from .schema import ConvergenceCluster, Finding, Hypothesis, SCHEMA_VERSION
 from .session_state import SessionStore
 from .transport_state import TransportState
 from software_butcher.brain.confirmation import process_finding
-from software_butcher.core.app_root import ApplicationRoot, infer_application_root
+from software_butcher.core.app_root import ApplicationRoot, ensure_app_subtree_hypotheses, infer_application_root
 from software_butcher.core.url_utils import canonical_web_url, host_key
 
 logger = logging.getLogger(__name__)
@@ -141,6 +141,15 @@ class FindingStore:
 
         self._sync_queue_config()
         self.queue.prune_out_of_app_scope()
+        app_root = infer_application_root(self.findings.values(), self._base_target)
+        if app_root is not None and self._engagement_type == "assessment":
+            for hypothesis in ensure_app_subtree_hypotheses(
+                self.findings,
+                app_root,
+                base_target=self._base_target,
+                engagement_type=self._engagement_type,
+            ):
+                self.queue.add(hypothesis, self._base_target)
         self.engagement = infer_phase(
             list(self.findings.values()),
             self.engagement,

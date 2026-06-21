@@ -7,6 +7,8 @@ tool categories on the HexStrike server.
 
 from __future__ import annotations
 
+from typing import Iterable
+
 from software_butcher.core.asset_classifier import is_static_asset
 from software_butcher.core.meta_utils import as_dict, as_dict_list
 from software_butcher.core.path_relevance import is_noise_path, score_path
@@ -48,6 +50,7 @@ class HypothesisGenerator:
         *,
         engagement_type: str = "assessment",
         base_target: str = "",
+        all_findings: Iterable[Finding] | None = None,
     ) -> list[Hypothesis]:
         generated: list[Hypothesis] = []
         et = normalize_engagement_type(engagement_type)
@@ -56,6 +59,8 @@ class HypothesisGenerator:
         # or the path extension alone reveals the static nature of the resource.
         if finding.asset_type == "static_asset" or is_static_asset(finding.path):
             return generated
+
+        scope_findings = list(all_findings) if all_findings is not None else [finding]
 
         text = self._finding_text(finding)
         # Use path stem for path-based signals to avoid false matches from
@@ -135,7 +140,6 @@ class HypothesisGenerator:
                         )
 
         meta = finding.metadata or {}
-        scope_findings = [finding]
 
         def _defer_url(url: str) -> bool:
             return should_defer_out_of_app_hypothesis(

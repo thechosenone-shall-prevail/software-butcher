@@ -18,6 +18,7 @@ from software_butcher.core.assets import Asset
 from software_butcher.core.registry import DEFAULT_REGISTRY, AdapterRegistry, Registry, default_registry
 from software_butcher.core.router import AssetRouter, RouteDecision
 from software_butcher.synthesis.report import Synthesizer
+from software_butcher.core.app_root import should_defer_out_of_app_hypothesis
 from software_butcher.core.recon_seed import ensure_host_recon_hypothesis, next_recon_hypothesis
 from software_butcher.core.scope import Scope
 from software_butcher.core.url_utils import base_web_url, engagement_entry_url, host_key
@@ -964,6 +965,28 @@ def _findings_from_adapter_result(
     return findings
 
 
+def _generate_followups(
+    store: FindingStore,
+    hypothesis_generator: HypothesisGenerator,
+    finding: Finding,
+) -> list:
+    all_findings = list(store.findings.values())
+    engagement_type = getattr(store, "_engagement_type", "assessment")
+    if should_defer_out_of_app_hypothesis(
+        finding.path,
+        all_findings,
+        base_target=store.base_target,
+        engagement_type=engagement_type,
+    ):
+        return []
+    return hypothesis_generator.generate(
+        finding,
+        engagement_type=engagement_type,
+        base_target=store.base_target,
+        all_findings=all_findings,
+    )
+
+
 def _ingest_finding(
     store: FindingStore,
     finding: Finding,
@@ -1271,11 +1294,7 @@ def run_brain_once(
             capability=str((decision.options or {}).get("capability") or decision.intent or ""),
         ):
             if _ingest_finding(store, finding, branch_id, on_finding_ingested):
-                generated = hypothesis_generator.generate(
-                    finding,
-                    engagement_type=getattr(store, "_engagement_type", "assessment"),
-                    base_target=store.base_target,
-                )
+                generated = _generate_followups(store, hypothesis_generator, finding)
                 if generated:
                     store.add_hypotheses(generated)
                 if primary_finding is None:
@@ -1296,11 +1315,7 @@ def run_brain_once(
             on_finding_ingested=on_finding_ingested,
         )
         if primary_finding:
-            generated = hypothesis_generator.generate(
-                primary_finding,
-                engagement_type=getattr(store, "_engagement_type", "assessment"),
-                base_target=store.base_target,
-            )
+            generated = _generate_followups(store, hypothesis_generator, primary_finding)
             if generated:
                 store.add_hypotheses(generated)
 

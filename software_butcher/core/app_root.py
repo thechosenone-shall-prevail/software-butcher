@@ -425,7 +425,8 @@ def hypothesis_in_application_scope(
     if url_under_application_root(path, app_root):
         return True
 
-    if incomplete and is_infrastructure_url(path, findings_list):
+    # While app-subtree deep analysis is outstanding, admit only in-subtree work.
+    if incomplete:
         return False
 
     if is_infrastructure_url(path, findings_list):
@@ -611,6 +612,111 @@ def assessment_serializes_branches(
             parts.append("deep analysis incomplete on mapped app pages")
         return True, f"app_scope_serialize: {', '.join(parts)}"
     return True, f"assessment_app_focus: app root {app_root.url} — single branch"
+
+
+def _best_app_source_finding_id(findings: dict[str, Finding], app_root: ApplicationRoot) -> str:
+    for finding in findings.values():
+        if _finding_under_root(finding, app_root):
+            return finding.id
+    first = next(iter(findings.values()), None)
+    return first.id if first else "app:scope"
+
+
+def ensure_app_subtree_hypotheses(
+    findings: dict[str, Finding],
+    app_root: ApplicationRoot,
+    *,
+    base_target: str = "",
+    engagement_type: str = "assessment",
+) -> list[Hypothesis]:
+    """Seed missing map/audit hypotheses for the inferred app subtree."""
+    if engagement_type != "assessment":
+        return []
+    findings_list = list(findings.values())
+    if not app_subtree_analysis_incomplete(findings_list, app_root):
+        return []
+
+    source_id = _best_app_source_finding_id(findings, app_root)
+    queued: list[Hypothesis] = []
+
+    for url in app_root_pending_urls(findings_list, app_root):
+        queued.append(
+            Hypothesis(
+                path=url,
+                reason="Organic app link discovered — map content, forms, and redirect behavior.",
+                source_finding_id=source_id,
+                priority=0.93,
+                metadata={
+                    "intent": "http_surface_map",
+                    "asset_type": "web_endpoint",
+                    "generated_by": "app_link_expand",
+                    "organically_discovered": True,
+                },
+            )
+        )
+
+    for url, page in _iter_app_pages_with_data(findings_list, app_root):
+        if not _page_content_mapped(page):
+            continue
+        if not _capability_observed_on_url(findings_list, url, "security_posture_audit"):
+            queued.append(
+                Hypothesis(
+                    path=url,
+                    reason="Audit security headers, cookie flags, and CSRF tokens on this surface.",
+                    source_finding_id=source_id,
+                    priority=0.82,
+                    metadata={
+                        "intent": "security_posture_audit",
+                        "asset_type": "web_endpoint",
+                        "generated_by": "security_posture",
+                        "analysis_focus": "security_posture",
+                        "organically_discovered": True,
+                    },
+                )
+            )
+        if _page_redirect_leak_suspected(page) and not _capability_observed_on_url(
+            findings_list, url, "redirect_body_audit"
+        ):
+            queued.append(
+                Hypothesis(
+                    path=url,
+                    reason=(
+                        "Redirect hop on this page returned a large/structured body — "
+                        "confirm auth-after-render data leak."
+                    ),
+                    source_finding_id=source_id,
+                    priority=0.96,
+                    metadata={
+                        "intent": "redirect_body_audit",
+                        "asset_type": "web_endpoint",
+                        "generated_by": "redirect_audit",
+                        "analysis_focus": "redirect_body",
+                        "organically_discovered": True,
+                    },
+                )
+            )
+        elif (
+            any(int(entry.get("status") or 0) in {301, 302} for entry in as_dict_list(page.get("redirect_observations")))
+            and url.lower().endswith(".php")
+            and not _capability_observed_on_url(findings_list, url, "redirect_body_audit")
+        ):
+            queued.append(
+                Hypothesis(
+                    path=url,
+                    reason="Auth-gated PHP page with redirect hop — confirm auth-after-render data leak.",
+                    source_finding_id=source_id,
+                    priority=0.94,
+                    metadata={
+                        "intent": "redirect_body_audit",
+                        "asset_type": "web_endpoint",
+                        "generated_by": "redirect_audit",
+                        "analysis_focus": "redirect_body",
+                        "organically_discovered": True,
+                    },
+                )
+            )
+
+    return queued
 
 
 def should_defer_out_of_app_hypothesis(
