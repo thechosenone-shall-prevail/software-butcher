@@ -8,6 +8,7 @@ tool categories on the HexStrike server.
 from __future__ import annotations
 
 from software_butcher.core.asset_classifier import is_static_asset
+from software_butcher.core.domain_semantics import semantic_path_candidates
 from software_butcher.core.path_relevance import is_noise_path, score_path
 from software_butcher.core.url_utils import base_web_url
 from software_butcher.state.path_graph import parent_path
