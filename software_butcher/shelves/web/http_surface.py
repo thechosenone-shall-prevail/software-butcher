@@ -16,10 +16,12 @@ from software_butcher.core.path_relevance import (
 from software_butcher.core.adapter import AdapterCapability, AdapterRequest, AdapterResult
 from software_butcher.core.url_utils import base_web_url, host_key, same_origin
 from software_butcher.shelves.hexstrike.interpreter import HexStrikeInterpreter
+from software_butcher.shelves.web.app_link_expand import expand_organic_app_links
 from software_butcher.shelves.web.browser_nav import browser_navigate
 from software_butcher.shelves.web.content_intel import analyze_page_content
 from software_butcher.shelves.web.http_transport import SmartHttpTransport, TransportConfig
 from software_butcher.shelves.web.infrastructure_intel import InfrastructureProfile, analyze_infrastructure
+from software_butcher.shelves.web.redirect_audit import chain_leak_suspected, summarize_redirect_chain
 from software_butcher.state.transport_state import TransportState
 
 TECHNOLOGY_HEADERS = (
@@ -68,6 +70,8 @@ def _fetch_and_analyze_admin_panels(
     discovered: list[str],
     content_pages: list[dict[str, Any]],
     seen: set[str],
+    *,
+    nvd_api_key: str | None = None,
 ) -> None:
     """Follow organic admin-panel links and run view-source content analysis."""
     analyzed = {_normalize_url_key(str(p.get("url") or "")) for p in content_pages}
@@ -85,6 +89,7 @@ def _fetch_and_analyze_admin_panels(
             headers=probe.headers,
             body=probe.body,
             title=probe_title,
+            nvd_api_key=nvd_api_key,
         )
         content_pages.append(content)
         analyzed.add(key)
@@ -214,6 +219,9 @@ def map_http_surface(
 
     config = TransportConfig.from_scope(scope)
     transport = SmartHttpTransport(config, proxy_index=ts.global_proxy_index)
+    scope_meta = (scope or {}).get("metadata") if isinstance((scope or {}).get("metadata"), dict) else {}
+    cve_api = scope_meta.get("cve_api") if isinstance(scope_meta.get("cve_api"), dict) else {}
+    nvd_api_key = str(cve_api.get("nvd_api_key") or "") or None
 
     def on_rate_limit(h: str, signal) -> None:
         ts.record_rate_limit(h, signal)
@@ -315,6 +323,7 @@ def map_http_surface(
                 headers=probe.headers,
                 body=probe.body,
                 title=probe_title,
+                nvd_api_key=nvd_api_key,
             )
             semantic_probes.append(
                 {
@@ -340,17 +349,60 @@ def map_http_surface(
         headers=headers,
         body=html,
         title=title,
+        nvd_api_key=nvd_api_key,
     )
     content_pages.append(root_content)
 
     if _admin_panel_urls(discovered):
         _fetch_and_analyze_admin_panels(
-            transport, base, host, discovered, content_pages, seen
+            transport, base, host, discovered, content_pages, seen, nvd_api_key=nvd_api_key
         )
 
     for probe in semantic_probes:
         if probe.get("content_analysis"):
             content_pages.append(probe["content_analysis"])
+
+    # Organic app expansion from entry pages (forms, reachable semantic probes).
+    expand_cfg = meta.get("app_expand") if isinstance(meta.get("app_expand"), dict) else {}
+    max_expand_pages = int(expand_cfg.get("max_pages") or 15)
+    max_expand_depth = int(expand_cfg.get("max_depth") or 2)
+    entry_urls: list[str] = []
+    if curl_final and not stack_landing.get("detected"):
+        entry_urls.append(curl_final)
+    for probe in semantic_probes:
+        if probe.get("reachable") and probe.get("url"):
+            entry_urls.append(str(probe["url"]))
+    for page in content_pages:
+        if int(page.get("form_count") or 0) > 0 and page.get("url"):
+            entry_urls.append(str(page["url"]))
+    app_expand_result: dict[str, Any] = {}
+    if entry_urls:
+        app_expand_result = expand_organic_app_links(
+            transport,
+            base,
+            host,
+            entry_urls=entry_urls,
+            seen=seen,
+            content_pages=content_pages,
+            discovered=discovered,
+            max_depth=max_expand_depth,
+            max_pages=max_expand_pages,
+            nvd_api_key=nvd_api_key,
+        )
+
+    browser_hops = list(browser_result.redirect_hops or [])
+
+    # Compact, persistence-safe redirect summary across curl, assessment, and browser hops.
+    redirect_observations = (
+        summarize_redirect_chain(browser_get.redirect_chain)
+        + summarize_redirect_chain(assessment_get.redirect_chain)
+        + summarize_redirect_chain(browser_hops)
+    )
+    redirect_body_leak_suspected = (
+        chain_leak_suspected(browser_get.redirect_chain)
+        or chain_leak_suspected(assessment_get.redirect_chain)
+        or chain_leak_suspected(browser_hops)
+    )
 
     scored_urls: list[dict[str, Any]] = []
     prioritized: list[str] = []
@@ -370,6 +422,8 @@ def map_http_surface(
         "head_chain": head.redirect_chain,
         "get_chain": browser_get.redirect_chain,
         "assessment_chain": assessment_get.redirect_chain,
+        "redirect_observations": redirect_observations,
+        "redirect_body_leak_suspected": redirect_body_leak_suspected,
         "browser_nav": browser_result.to_dict(),
         "status_code": browser_get.status_code,
         "headers": headers,
@@ -381,6 +435,7 @@ def map_http_surface(
         "stack_landing": stack_landing,
         "semantic_probes": semantic_probes,
         "content_pages": content_pages,
+        "app_expand": app_expand_result,
         "discovered_urls": prioritized,
         "all_discovered_urls": discovered,
         "scored_urls": scored_urls,
@@ -486,7 +541,13 @@ class HttpSurfaceAdapter:
         for hop in surface.get("get_chain") or []:
             evidence.append(
                 f"redirect: {hop.get('status')} {hop.get('url')} -> {hop.get('location') or ''} "
-                f"[{hop.get('profile', 'browser')}]".rstrip()
+                f"[{hop.get('profile', 'browser')}] body_len={hop.get('body_len', 0)}".rstrip()
+            )
+
+        if surface.get("redirect_body_leak_suspected"):
+            evidence.append(
+                "redirect_body_leak_suspected=true (a 3xx hop returned a large/structured body — "
+                "run redirect_body_audit to confirm auth-after-render data leak)"
             )
 
         for name, value in sorted(headers.items()):
@@ -544,6 +605,8 @@ class HttpSurfaceAdapter:
             "content_pages": surface.get("content_pages"),
             "scored_urls": surface.get("scored_urls"),
             "all_discovered_urls": surface.get("all_discovered_urls"),
+            "redirect_observations": surface.get("redirect_observations"),
+            "redirect_body_leak_suspected": surface.get("redirect_body_leak_suspected"),
         }
         if rate_limit and rate_limit.get("detected"):
             metadata["rate_limited"] = True

@@ -408,6 +408,13 @@ class HypothesisGenerator:
                         )
                     )
 
+        # ── Deep web-audit follow-ups from a surface map ────────────────────
+        # These advance an observed URL to application-logic analysis instead of
+        # re-mapping it: redirect-body leaks, security posture/CSRF, phpMyAdmin,
+        # resource exhaustion, and version-gated CVE viability.
+        if capability == "http_surface_map" and not is_noise_path(finding.path):
+            generated.extend(self._web_audit_followups(finding, meta))
+
         if capability == "auth_bypass_confirmed":
             # Walk up to the site root for authenticated crawling
             root = finding.path
@@ -433,6 +440,96 @@ class HypothesisGenerator:
                 )
 
         return generated
+
+    @staticmethod
+    def _web_audit_followups(finding: Finding, meta: dict) -> list[Hypothesis]:
+        """Seed deep-analysis hypotheses (redirect/posture/phpMyAdmin/DoS/CVE) from a surface map."""
+        followups: list[Hypothesis] = []
+        path = finding.path
+
+        def _seed(intent: str, reason: str, priority: float, generated_by: str, focus: str | None = None) -> None:
+            metadata = {
+                "intent": intent,
+                "asset_type": "web_endpoint",
+                "generated_by": generated_by,
+                "organically_discovered": True,
+            }
+            if focus:
+                metadata["analysis_focus"] = focus
+            followups.append(
+                Hypothesis(
+                    path=path,
+                    reason=reason,
+                    source_finding_id=finding.id,
+                    priority=priority,
+                    metadata=metadata,
+                )
+            )
+
+        content_pages = meta.get("content_pages") or []
+
+        # Redirect-body leak (Cursor's #1/#2 confirmed class) — highest value.
+        if meta.get("redirect_body_leak_suspected"):
+            _seed(
+                "redirect_body_audit",
+                "A 3xx hop returned a large/structured body — confirm auth-after-render data leak.",
+                0.94,
+                "redirect_audit",
+                focus="redirect_body",
+            )
+
+        # Security posture / CSRF — cheap deterministic audit on every mapped URL.
+        _seed(
+            "security_posture_audit",
+            "Audit security headers, cookie flags, and CSRF tokens on this surface.",
+            0.7,
+            "security_posture",
+            focus="security_posture",
+        )
+
+        # phpMyAdmin reasoned follow-up.
+        page_type = str(meta.get("page_type") or "")
+        is_pma = (
+            page_type == "phpmyadmin"
+            or "phpmyadmin" in path.lower()
+            or any(str(p.get("page_type") or "") == "phpmyadmin" for p in content_pages)
+        )
+        if is_pma:
+            _seed(
+                "phpmyadmin_assess",
+                "phpMyAdmin reachable — assess version, default creds, and version-gated CVEs (not a 403 dead-end).",
+                0.9,
+                "phpmyadmin_assess",
+                focus="broken_access",
+            )
+
+        # DoS / resource-exhaustion reasoning on DB-backed / form endpoints.
+        has_db_or_forms = bool(meta.get("mysql_signals") or meta.get("form_count")) or any(
+            p.get("mysql_signals") or p.get("form_count") for p in content_pages
+        )
+        if has_db_or_forms:
+            _seed(
+                "dos_viability",
+                "DB-backed/form endpoint — reason about resource exhaustion when rate limiting is absent.",
+                0.6,
+                "dos_viability",
+                focus="resource_exhaustion",
+            )
+
+        # Version-gated CVE viability — real capability name (not cve_lookup).
+        has_versions = bool(meta.get("php_version") or meta.get("stack_cve_candidates")) or any(
+            p.get("php_version") or p.get("stack_cve_candidates") for p in content_pages
+        )
+        if has_versions and not meta.get("stack_cve_viability_checked"):
+            _seed(
+                "stack_cve_intel",
+                "Observed stack versions — reason about version-gated CVE viability before generic scanners.",
+                0.85,
+                "stack_cve_intel",
+                focus="stack_cve_viability",
+            )
+
+        return followups
 
     @staticmethod
     def _has_actionable_sqli_evidence(finding: Finding, text: str) -> bool:

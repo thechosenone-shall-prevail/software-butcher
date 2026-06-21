@@ -1,5 +1,7 @@
 """Tests for stack CVE viability reasoning."""
 
+from unittest.mock import patch
+
 from software_butcher.brain.hypotheses import HypothesisGenerator
 from software_butcher.brain.loop import _apply_assessment_priority_gate, _apply_scanner_gate
 from software_butcher.brain.policy import PolicyDecision
@@ -11,16 +13,26 @@ from software_butcher.state.store import FindingStore
 
 
 def test_stack_cve_viability_includes_reasoning():
-    result = analyze_stack_cve_viability(
-        url="http://example.com/dashboard/phpinfo.php",
-        php_version="7.4.33",
-        server_header="Apache/2.4.41 (Unix)",
-        page_type="phpinfo",
-        phpinfo_exposed=True,
-        xampp_detected=True,
-    )
+    with patch("software_butcher.shelves.web.stack_cve_intel.lookup_stack_cves") as mock_lookup:
+        mock_lookup.return_value = [
+            {
+                "cve": "CVE-2024-4577",
+                "component": "PHP 8.0.25",
+                "source": "osv",
+                "summary": "PHP CGI argument injection on Windows",
+            }
+        ]
+        result = analyze_stack_cve_viability(
+            url="http://example.com/dashboard/phpinfo.php",
+            php_version="8.0.25",
+            server_header="Apache/2.4.41 (Unix)",
+            page_type="phpinfo",
+            phpinfo_exposed=True,
+            xampp_detected=True,
+        )
     assert result["stack_cve_viability_checked"] is True
-    assert any(c["viable"] == "yes" for c in result["stack_cve_candidates"])
+    assert result["live_cve_lookup"] is True
+    assert any(c["cve"] == "CVE-2024-4577" for c in result["stack_cve_candidates"])
     assert all("reasoning" in c for c in result["stack_cve_candidates"])
 
 
@@ -29,12 +41,18 @@ def test_phpinfo_content_emits_stack_cve_candidates():
         "<html><body><h1>PHP Version</h1><td>PHP Version</td><td>8.0.25</td>"
         "phpinfo() Configuration PHP Core XAMPP</body></html>"
     )
-    result = analyze_page_content(
-        "http://example.com/dashboard/phpinfo.php",
-        headers={"X-Powered-By": "PHP/8.0.25", "Server": "Apache/2.4.48 (Unix)"},
-        body=body,
-        title="phpinfo()",
-    )
+    with patch("software_butcher.shelves.web.content_intel.analyze_stack_cve_viability") as mock_cve:
+        mock_cve.return_value = {
+            "stack_cve_candidates": [{"cve": "CVE-LIVE-1", "viable": "maybe", "reasoning": "test"}],
+            "stack_cve_viability_checked": True,
+            "conclusions": ["PHP 8.0.25 / CVE-LIVE-1: viable=maybe — test"],
+        }
+        result = analyze_page_content(
+            "http://example.com/dashboard/phpinfo.php",
+            headers={"X-Powered-By": "PHP/8.0.25", "Server": "Apache/2.4.48 (Unix)"},
+            body=body,
+            title="phpinfo()",
+        )
     assert result["stack_cve_viability_checked"] is True
     assert result["stack_cve_candidates"]
     assert any("viable=" in c for c in result["conclusions"])
@@ -51,7 +69,7 @@ def test_phpinfo_queues_stack_cve_and_pii_hypotheses():
             "page_type": "phpinfo",
             "php_version": "8.0.25",
             "stack_cve_viability_checked": True,
-            "stack_cve_candidates": [{"cve": "PII-phpinfo-disclosure", "viable": "yes"}],
+            "stack_cve_candidates": [{"cve": "config-disclosure", "viable": "yes"}],
         },
     )
     hyps = HypothesisGenerator().generate(finding, engagement_type="assessment")

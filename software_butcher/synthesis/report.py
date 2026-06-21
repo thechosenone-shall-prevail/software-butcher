@@ -171,10 +171,7 @@ Rules for 'reproduction_steps' and 'fixes':
 
         if llm_client:
             try:
-                findings_summary = "\n".join([
-                    f"- [{f.status}] {f.id}: {f.hypothesis} (conf: {f.confidence})\n  Evidence: {f.evidence}"
-                    for f in active
-                ])
+                findings_summary = self._llm_findings_digest(active)
                 lane_text = "\n".join(f"- {lane.name}: {lane.status} — {lane.summary}" for lane in lanes)
                 sys.stderr.write("\n[Synthesis] Consulting LLM for final verdict...\n")
                 model_name = os.environ.get("LLM_MODEL") or os.environ.get("OPENROUTER_MODEL") or "gpt-oss-120b"
@@ -188,22 +185,30 @@ Rules for 'reproduction_steps' and 'fixes':
                         )},
                     ],
                     response_format={"type": "json_object"},
-                    max_tokens=1000,
+                    temperature=0.0,
+                    # Larger budget + bounded input below prevents the truncated
+                    # "Unterminated string" failure that collapsed verdicts before.
+                    max_tokens=1600,
                 )
                 content = response.choices[0].message.content
-                result = json.loads(content) if content else {}
+                result = self._loads_or_salvage(content)
+                if result is None:
+                    raise ValueError("LLM verdict JSON unparseable even after salvage")
                 summary = result.get("summary", "LLM verdict generated.")
                 if lane_summary and lane_summary not in summary:
                     summary = f"{summary} {lane_summary}"
                 return Verdict(
                     name=result.get("name", "secure"),
                     summary=summary,
-                    cited_findings=result.get("cited_findings", cited),
+                    cited_findings=result.get("cited_findings") or cited,
                     reproduction_steps=result.get("reproduction_steps", []),
                     fixes=result.get("fixes", []),
                 )
             except Exception as exc:
-                sys.stderr.write(f"[Synthesis] LLM synthesis failed ({exc}), falling back to keyword matching.\n")
+                sys.stderr.write(
+                    f"[Synthesis] LLM synthesis failed ({exc}); using structured deterministic verdict "
+                    f"(findings still fully cited).\n"
+                )
 
         if self._is_compromised(store, lanes, confirmed, text):
             return Verdict(
@@ -217,7 +222,10 @@ Rules for 'reproduction_steps' and 'fixes':
         if self._is_partially_hardened(lanes, interactive, text):
             return Verdict(
                 name="partially_hardened",
-                summary=f"Attack surface or risky evidence found without a full confirmed chain. {lane_summary}".strip(),
+                summary=(
+                    f"Attack surface or risky evidence found without a full confirmed chain. "
+                    f"{self._counts_summary(active, confirmed)} {lane_summary}"
+                ).strip(),
                 cited_findings=cited,
                 reproduction_steps=self._repro_steps(findings),
                 fixes=self._fixes(findings, lanes),
@@ -225,7 +233,10 @@ Rules for 'reproduction_steps' and 'fixes':
 
         return Verdict(
             name="secure",
-            summary=f"No exploitable path confirmed in the current evidence set. {lane_summary}".strip(),
+            summary=(
+                f"No exploitable path confirmed in the current evidence set. "
+                f"{self._counts_summary(active, confirmed)} {lane_summary}"
+            ).strip(),
             cited_findings=cited,
         )
 
@@ -267,6 +278,71 @@ Rules for 'reproduction_steps' and 'fixes':
         parts = [f"{lane.name}={lane.status}" for lane in active]
         prefix = f"Target {base_target}:" if base_target else "Assessment:"
         return f"{prefix} " + ", ".join(parts) + "."
+
+    @staticmethod
+    def _counts_summary(active: list[Finding], confirmed: list[Finding]) -> str:
+        return f"{len(confirmed)} confirmed / {len(active)} active findings."
+
+    @staticmethod
+    def _llm_findings_digest(findings: list[Finding], *, max_findings: int = 30, max_evidence: int = 4) -> str:
+        """Bounded, clean digest for the LLM — keeps output from truncating.
+
+        Confirmed findings first, evidence trimmed and length-capped, so the
+        model receives a compact payload it can summarize within token budget.
+        """
+        ordered = sorted(findings, key=lambda f: (f.status != "confirmed", -f.confidence))[:max_findings]
+        lines: list[str] = []
+        for f in ordered:
+            evidence = " | ".join(str(e)[:160] for e in f.evidence[:max_evidence])
+            lines.append(
+                f"- [{f.status}] {f.id} (conf {f.confidence:.2f}): {f.hypothesis[:200]}\n"
+                f"  evidence: {evidence[:600]}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _loads_or_salvage(content: str | None) -> dict | None:
+        """Parse LLM JSON, repairing common truncation/format damage if needed."""
+        if not content:
+            return None
+        text = content.strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text[:4].lower() == "json":
+                text = text[4:]
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
+        except (ValueError, TypeError):
+            pass
+
+        # Salvage: trim to the outermost object and balance a dangling string/braces.
+        start = text.find("{")
+        if start == -1:
+            return None
+        snippet = text[start:]
+        end = snippet.rfind("}")
+        if end != -1:
+            candidate = snippet[: end + 1]
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (ValueError, TypeError):
+                pass
+
+        # Drop a truncated trailing field, then close the object.
+        if snippet.count('"') % 2:  # dangling open string
+            snippet = snippet[: snippet.rfind('"')]
+        snippet = snippet[: snippet.rfind(",")] if "," in snippet else snippet
+        for closer in ("}", '"}', '"]}'):
+            try:
+                parsed = json.loads(snippet + closer)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (ValueError, TypeError):
+                continue
+        return None
 
     @staticmethod
     def _cited_findings(findings: list[Finding]) -> list[Finding]:

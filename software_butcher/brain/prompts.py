@@ -154,31 +154,76 @@ Prioritisation (in order of weight):
 
 
 
-_CAPABILITIES_LIST = """
+# Default capability roster (used when the live registry list is not supplied).
+# NOTE: there is NO "cve_lookup" — the real version-gated CVE capability is
+# "stack_cve_intel". Earlier prompts advertised a name with no registered
+# adapter, which is why the LLM kept hallucinating it.
+_DEFAULT_CAPABILITY_NAMES: tuple[str, ...] = (
+    "http_surface_map",
+    "redirect_body_audit",
+    "security_posture_audit",
+    "stack_cve_intel",
+    "phpmyadmin_assess",
+    "dos_viability",
+    "web_behavior_analysis",
+    "api_enumeration",
+    "api_fuzzing",
+    "credential_attack",
+    "port_scanning",
+    "cms_scanning",
+    "xss_scanning",
+    "exploit_generation",
+    "authenticated_discovery",
+    "technology_fingerprint",
+    "bugbounty_osint",
+    "bugbounty_recon",
+    "endpoint_discovery",
+    "directory_bruteforce",
+    "vulnerability_scanning",
+    "sql_injection_probing",
+    "bugbounty_comprehensive",
+    "binary_analysis",
+    "shell_command_execution",
+    "cloud_security_audit",
+    "container_security",
+    "iac_scanning",
+    "ad_enumeration",
+    "ai_attack_chain",
+)
 
-Available capabilities (choose one name exactly; assessment mode prefers top of list, sql_injection_probing is last resort):
 
-http_surface_map, cve_lookup, web_behavior_analysis, api_enumeration, api_fuzzing, credential_attack,
+def _capabilities_block(capabilities: tuple[str, ...] | list[str] | None) -> str:
+    names = tuple(capabilities) if capabilities else _DEFAULT_CAPABILITY_NAMES
+    # Preserve order, drop dupes, guarantee http_surface_map is present and first.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in ("http_surface_map", *names):
+        if name and name not in seen:
+            seen.add(name)
+            ordered.append(name)
+    joined = ", ".join(ordered)
+    return (
+        "\n\nAvailable capabilities (choose ONE name EXACTLY from this list — these are the only "
+        "registered capabilities; never invent or guess a capability name that is not listed below. "
+        "Assessment mode prefers the top of the list; sql_injection_probing is last resort):\n\n"
+        f"{joined}\n"
+    )
 
-port_scanning, cms_scanning, xss_scanning, exploit_generation, authenticated_discovery,
-
-technology_fingerprint, bugbounty_osint, bugbounty_recon, endpoint_discovery, directory_bruteforce,
-
-vulnerability_scanning, sql_injection_probing, bugbounty_comprehensive, binary_analysis,
-
-shell_command_execution, cloud_security_audit, container_security, iac_scanning, ad_enumeration,
-
-ai_attack_chain
-
-"""
 
 
 
 
+def build_brain_capability_prompt(
+    engagement_type: str = "assessment",
+    capabilities: tuple[str, ...] | list[str] | None = None,
+) -> str:
 
-def build_brain_capability_prompt(engagement_type: str = "assessment") -> str:
+    """Return engagement-type-aware capability selection prompt.
 
-    """Return engagement-type-aware capability selection prompt."""
+    When ``capabilities`` is provided (e.g. the live registry's capability
+    names) the roster is built from it, so the LLM only ever sees real,
+    selectable capability names.
+    """
 
     et = (engagement_type or "assessment").lower()
 
@@ -192,7 +237,7 @@ def build_brain_capability_prompt(engagement_type: str = "assessment") -> str:
 
         f"{mode_rules}\n"
 
-        f"{_CAPABILITIES_LIST}\n\n"
+        f"{_capabilities_block(capabilities)}\n\n"
 
         "Respond ONLY with valid JSON (no markdown):\n"
 

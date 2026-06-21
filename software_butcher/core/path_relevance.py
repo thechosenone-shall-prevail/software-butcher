@@ -62,6 +62,10 @@ ORGANIC_GENERATORS = frozenset(
         "domain_seed",
         "asset_expander",
         "escalation_ladder",
+        "redirect_audit",
+        "security_posture",
+        "phpmyadmin_assess",
+        "dos_viability",
     }
 )
 

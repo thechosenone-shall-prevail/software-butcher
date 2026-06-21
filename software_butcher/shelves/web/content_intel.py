@@ -65,6 +65,7 @@ def analyze_page_content(
     headers: dict[str, str],
     body: str,
     title: str = "",
+    nvd_api_key: str | None = None,
 ) -> dict[str, Any]:
     """Ctrl-U style read: structure, stack leaks, forms, admin exposure."""
     text = strip_html_to_text(body)
@@ -133,6 +134,7 @@ def analyze_page_content(
         phpinfo_exposed=page_type == "phpinfo",
         xampp_detected=xampp_detected,
         auth_required=None if page_type != "phpmyadmin" else False,
+        nvd_api_key=nvd_api_key,
     )
     for cve_conclusion in stack_cve.get("conclusions") or []:
         if cve_conclusion not in conclusions:

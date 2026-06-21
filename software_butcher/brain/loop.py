@@ -6,6 +6,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
+from software_butcher.brain.capability_resolver import resolve_capability
 from software_butcher.brain.context import build_brain_context
 from software_butcher.brain.prompts import build_brain_capability_prompt
 from software_butcher.brain.guards import LoopGuard
@@ -53,7 +54,14 @@ _INTENT_ADAPTER_MAP: dict[str, str] = {
     # Frameworks
     "validate_ad_emulation": "caldera",
     "validate_cloud_attack_path": "stratus_red_team",
-    "cve_lookup": "hexstrike",
+    # Web audit shelf — deep deterministic analyzers (observe-once / analyze-many).
+    "redirect_body_audit": "web_audit",
+    "security_posture_audit": "web_audit",
+    "phpmyadmin_assess": "web_audit",
+    "dos_viability": "web_audit",
+    "stack_cve_intel": "web_audit",
+    # Legacy/hallucinated name kept mapped so it still routes to a real adapter.
+    "cve_lookup": "web_audit",
     "deep_fuzz": "boaz",
     "deploy_c2": "sliver",
     # NEW: All capabilities route to hexstrike (server endpoints)
@@ -267,6 +275,102 @@ def _url_has_actionable_sqli_evidence(store: FindingStore, host: str, target_url
     )
 
 
+# Deep-analysis capabilities that advance an already-observed URL, in the order
+# the observation-completeness gate should try them.
+_ANALYSIS_CAPABILITIES_ORDER: tuple[str, ...] = (
+    "redirect_body_audit",
+    "security_posture_audit",
+    "phpmyadmin_assess",
+    "stack_cve_intel",
+    "dos_viability",
+)
+
+# Hypotheses with these generated_by tags are *directed* investigations; the
+# relevance noise filter (built for XAMPP locale spam) must never suppress them.
+_DIRECTED_GENERATORS: frozenset[str] = frozenset({
+    "content_intel",
+    "broken_access",
+    "pii_exposure",
+    "mysql_resource_intel",
+    "domain_semantics",
+    "browser_divergence",
+    "stack_cve_intel",
+    "auth_escalation",
+    "redirect_audit",
+    "security_posture",
+    "phpmyadmin_assess",
+    "dos_viability",
+})
+
+
+def _url_observed_capabilities(store: FindingStore, host: str, target_url: str) -> set[str]:
+    """Capabilities already executed against this exact URL (the observation ledger)."""
+    target = _normalize_url(target_url)
+    observed: set[str] = set()
+    if not target:
+        return observed
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        capability = str(meta.get("capability") or "")
+        path = _normalize_url(finding.path)
+        mapped = _normalize_url(str(meta.get("mapped_target") or ""))
+        if capability and (path == target or mapped == target):
+            observed.add(capability)
+    return observed
+
+
+def _url_redirect_leak_suspected(store: FindingStore, host: str, target_url: str) -> bool:
+    target = _normalize_url(target_url)
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        if _normalize_url(finding.path) != target and _normalize_url(str(meta.get("mapped_target") or "")) != target:
+            continue
+        for entry in meta.get("redirect_observations") or []:
+            if entry.get("leak_suspected"):
+                return True
+    return False
+
+
+def _url_looks_like_phpmyadmin(store: FindingStore, host: str, target_url: str) -> bool:
+    if "phpmyadmin" in (target_url or "").lower():
+        return True
+    target = _normalize_url(target_url)
+    for finding in _host_findings(store, host):
+        meta = finding.metadata or {}
+        if _normalize_url(finding.path) != target:
+            continue
+        if str(meta.get("page_type") or "") == "phpmyadmin":
+            return True
+        for page in meta.get("content_pages") or []:
+            if _normalize_url(str(page.get("url") or "")) == target and str(page.get("page_type") or "") == "phpmyadmin":
+                return True
+    return False
+
+
+def _url_has_resource_exhaustion_surface(store: FindingStore, host: str, target_url: str) -> bool:
+    return _url_has_db_backend_confirmed(store, host, target_url) or _url_has_forms(store, host, target_url)
+
+
+def _next_analysis_capability(store: FindingStore, host: str, target_url: str) -> str | None:
+    """First deep-analysis capability not yet run on this URL and applicable to it."""
+    observed = _url_observed_capabilities(store, host, target_url)
+    for capability in _ANALYSIS_CAPABILITIES_ORDER:
+        if capability in observed:
+            continue
+        if capability == "redirect_body_audit" and not _url_redirect_leak_suspected(store, host, target_url):
+            continue
+        if capability == "phpmyadmin_assess" and not _url_looks_like_phpmyadmin(store, host, target_url):
+            continue
+        if capability == "stack_cve_intel" and (
+            not _host_has_stack_versions(store, host) or _host_stack_cve_checked(store, host)
+        ):
+            continue
+        if capability == "dos_viability" and not _url_has_resource_exhaustion_surface(store, host, target_url):
+            continue
+        return capability
+    return None
+
+
 def _host_stack_landing_pending_app(store: FindingStore, host: str) -> bool:
     """XAMPP/default stack detected but no concrete application entry mapped yet."""
     stack_detected = False
@@ -390,6 +494,14 @@ def _apply_path_relevance_gate(
     if not store.recon_checklist.is_complete(host):
         return decision
 
+    # Relevance gating suppresses *speculative* remaps only. A directed
+    # hypothesis (one carrying an analysis focus or an organic/directed
+    # generated_by tag) must never be blocked by the noise filter — this is the
+    # /dashboard over-block fix.
+    meta = hypothesis.metadata or {}
+    if meta.get("analysis_focus") or str(meta.get("generated_by") or "") in _DIRECTED_GENERATORS:
+        return decision
+
     if is_noise_path(hypothesis.path):
         sys.stderr.write(
             f"[Brain] Skipping surface remap of noise path {hypothesis.path} — marking complete.\n"
@@ -415,6 +527,70 @@ def _apply_path_relevance_gate(
             options={"capability": "continue_discovery", "skip_execute": True},
         )
     return decision
+
+
+def _apply_observation_completeness_gate(
+    store: FindingStore,
+    hypothesis,
+    decision: PolicyDecision,
+) -> PolicyDecision:
+    """Stop re-running http_surface_map on already-observed URLs.
+
+    The observation ledger lives in finding state (per-URL capability metadata).
+    Once a URL has been surface-mapped, a repeat http_surface_map yields no new
+    evidence — so advance to the next deep-analysis capability (redirect body,
+    security posture, phpMyAdmin, CVE viability, DoS) that has not yet run on it.
+    This is the fix for the "17 steps, mostly remaps" loop.
+    """
+    if (decision.options or {}).get("skip_execute"):
+        return decision
+
+    if decision.asset.asset_type not in {"web_endpoint", "api", "domain", "unknown"}:
+        return decision
+
+    capability = str((decision.options or {}).get("capability") or decision.intent or "")
+    if capability != "http_surface_map":
+        return decision
+
+    host = host_key(hypothesis.path)
+    target_url = hypothesis.path.rstrip("/")
+
+    # Only dedup once the URL actually has a content map; never block a first map.
+    if not _url_has_content_map(store, host, target_url):
+        return decision
+
+    next_cap = _next_analysis_capability(store, host, target_url)
+    if next_cap:
+        sys.stderr.write(
+            f"[Brain] {target_url} already surface-mapped — advancing to {next_cap} "
+            f"instead of remapping.\n"
+        )
+        return PolicyDecision(
+            intent=next_cap,
+            asset=Asset(
+                locator=target_url,
+                asset_type=decision.asset.asset_type if decision.asset.asset_type != "unknown" else "web_endpoint",
+                parent=decision.asset.parent,
+                metadata=decision.asset.metadata,
+            ),
+            preferred_adapter="web_audit",
+            reason=(
+                f"URL {target_url} is already observed; advancing to deeper analysis ({next_cap}) "
+                f"rather than re-running http_surface_map."
+            ),
+            options={"capability": next_cap},
+        )
+
+    sys.stderr.write(
+        f"[Brain] {target_url} fully observed and analyzed — skipping redundant surface remap.\n"
+    )
+    return PolicyDecision(
+        intent="continue_discovery",
+        asset=decision.asset,
+        preferred_adapter="hexstrike",
+        reason=f"URL {target_url} already mapped and all deep analyses run; no remap needed.",
+        options={"capability": "continue_discovery", "skip_execute": True},
+    )
 
 
 def _apply_local_analysis_gate(
@@ -859,13 +1035,17 @@ def run_brain_once(
 
         sys.stderr.write(f"\n[Brain] Consulting external LLM for hypothesis: {hypothesis.path} (phase={phase}, pcs={pcs_mode})\n")
 
+        # Show the LLM ONLY the real, registered capability names so it cannot
+        # request a non-existent capability like 'cve_lookup'.
+        registry_capabilities = [c["capability"] for c in registry.list_capabilities()]
+
         try:
             model_name = os.environ.get("LLM_MODEL") or os.environ.get("OPENROUTER_MODEL") or "gpt-oss-120b"
             llm_response = llm_client.chat.completions.create(
                 model=model_name,
                 messages=[{
                     "role": "system",
-                    "content": build_brain_capability_prompt(engagement_type),
+                    "content": build_brain_capability_prompt(engagement_type, capabilities=registry_capabilities),
                 }, {
                     "role": "user",
                     "content": (
@@ -891,9 +1071,20 @@ def run_brain_once(
                 decision = None
             else:
                 sys.stderr.write(f"[Brain] LLM chose capability: {capability} (Reasoning: {llm_decision.get('reasoning')})\n")
+                # Resolve aliases / fuzzy matches (e.g. hallucinated 'cve_lookup'
+                # → real 'stack_cve_intel') before giving up to policy fallback.
+                resolved, how = resolve_capability(capability, registry_capabilities)
+                if resolved and resolved != capability:
+                    sys.stderr.write(
+                        f"[Brain] Resolved capability '{capability}' -> '{resolved}' ({how}).\n"
+                    )
+                    capability = resolved
                 adapter = registry.find_by_capability(capability or "")
                 if not adapter:
-                    sys.stderr.write(f"[Brain] Capability '{capability}' not found in registry. Falling back to policy.\n")
+                    sys.stderr.write(
+                        f"[Brain] Capability '{capability}' not registered (no alias/fuzzy match). "
+                        f"Falling back to policy.\n"
+                    )
                     decision = None
                 else:
                     decision = PolicyDecision(
@@ -931,6 +1122,7 @@ def run_brain_once(
 
     decision = _apply_recon_gate(store, hypothesis, decision, explicit_intent)
     decision = _apply_path_relevance_gate(store, hypothesis, decision)
+    decision = _apply_observation_completeness_gate(store, hypothesis, decision)
     decision = _apply_local_analysis_gate(store, hypothesis, decision)
     decision = _apply_scanner_gate(store, hypothesis, decision)
     decision = _apply_assessment_priority_gate(store, hypothesis, decision)

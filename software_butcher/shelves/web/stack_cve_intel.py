@@ -1,12 +1,12 @@
-"""Stack-specific CVE viability reasoning from observed versions and exposure."""
+"""Stack CVE viability — live OSV/NVD lookup with exposure-aware reasoning."""
 
 from __future__ import annotations
 
 import re
 from typing import Any
 
-# Curated shortlist of CVE/component identifiers for local viability reasoning on
-# mapped stack signals — not a live CVE database and not used for blind scanning.
+from software_butcher.shelves.web.live_cve_lookup import lookup_stack_cves, _reason_viability
+
 APACHE_VERSION_RE = re.compile(r"Apache[/\s]?([\d.]+)", re.I)
 PHPMYADMIN_VERSION_RE = re.compile(r"phpMyAdmin[^0-9]*([\d.]+)", re.I)
 
@@ -21,15 +21,6 @@ def _parse_version(version: str) -> tuple[int, ...]:
     return tuple(parts)
 
 
-def _version_in_range(version: str, minimum: str, maximum: str) -> bool:
-    v = _parse_version(version)
-    lo = _parse_version(minimum)
-    hi = _parse_version(maximum)
-    if not v or not lo or not hi:
-        return False
-    return lo <= v <= hi
-
-
 def analyze_stack_cve_viability(
     *,
     url: str,
@@ -37,104 +28,95 @@ def analyze_stack_cve_viability(
     server_header: str = "",
     page_type: str = "html",
     phpmyadmin_detected: bool = False,
+    phpmyadmin_version: str | None = None,
     phpinfo_exposed: bool = False,
     xampp_detected: bool = False,
     auth_required: bool | None = None,
+    nvd_api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Emit CVE candidates with viability reasoning for this engagement context."""
-    candidates: list[dict[str, str]] = []
-    server_l = (server_header or "").lower()
+    """Query live CVE APIs for observed versions; reason about viability on this engagement."""
     apache_match = APACHE_VERSION_RE.search(server_header or "")
+    apache_version = apache_match.group(1) if apache_match else None
 
-    if php_version:
-        if _version_in_range(php_version, "7.0.0", "7.4.99"):
-            viable = phpinfo_exposed or page_type == "phpinfo"
-            candidates.append(
-                {
-                    "cve": "PHP-7.x-EOL",
-                    "component": f"PHP {php_version}",
-                    "viable": "yes" if viable else "no",
-                    "reasoning": (
-                        f"PHP {php_version} is end-of-life — missing security patches. "
-                        + (
-                            "Viable: phpinfo/version disclosure confirms runtime for targeted CVE research."
-                            if viable
-                            else "Not viable yet: no phpinfo/version page mapped — confirm exposure before CVE spray."
-                        )
-                    ),
-                }
-            )
-        if _version_in_range(php_version, "8.0.0", "8.0.30"):
-            candidates.append(
-                {
-                    "cve": "CVE-2024-4577",
-                    "component": f"PHP {php_version}",
-                    "viable": "maybe",
-                    "reasoning": (
-                        f"PHP {php_version} in CGI/FPM Windows argument injection range — "
-                        "viable only if CGI mode or exposed php-cgi path confirmed (not typical XAMPP mod_php)."
-                    ),
-                }
-            )
+    live_entries = lookup_stack_cves(
+        php_version=php_version,
+        apache_version=apache_version,
+        phpmyadmin_version=phpmyadmin_version if phpmyadmin_detected else None,
+        nvd_api_key=nvd_api_key,
+    )
 
-    if apache_match:
-        apache_ver = apache_match.group(1)
-        if _version_in_range(apache_ver, "2.4.49", "2.4.50"):
-            candidates.append(
-                {
-                    "cve": "CVE-2021-41773",
-                    "component": f"Apache {apache_ver}",
-                    "viable": "maybe",
-                    "reasoning": (
-                        f"Apache {apache_ver} path traversal/RCE range — viable only if "
-                        "directory listing or alias misconfig exposes traversable paths (not blind nuclei)."
-                    ),
-                }
-            )
-        if xampp_detected:
-            candidates.append(
-                {
-                    "cve": "XAMPP-default-stack",
-                    "component": f"Apache {apache_ver} / XAMPP",
-                    "viable": "yes" if (phpmyadmin_detected or phpinfo_exposed) else "maybe",
-                    "reasoning": (
-                        "XAMPP default stack — prioritize exposed phpMyAdmin/phpinfo and app paths over "
-                        + (
-                            "generic nuclei/CVE templates."
-                            if phpmyadmin_detected or phpinfo_exposed
-                            else "scanners until admin/disclosure pages are content-mapped."
-                        )
-                    ),
-                }
-            )
-
-    if phpmyadmin_detected:
+    candidates: list[dict[str, str]] = []
+    for entry in live_entries:
+        reasoning = _reason_viability(
+            entry,
+            phpinfo_exposed=phpinfo_exposed,
+            phpmyadmin_detected=phpmyadmin_detected,
+            auth_required=auth_required,
+            xampp_detected=xampp_detected,
+            page_type=page_type,
+        )
+        viable = "maybe"
+        if reasoning.startswith("viable="):
+            viable = reasoning.split("—", 1)[0].replace("viable=", "").strip()
         candidates.append(
             {
-                "cve": "phpMyAdmin-misconfig",
-                "component": "phpMyAdmin",
-                "viable": "yes" if auth_required is False else "maybe",
-                "reasoning": (
-                    "phpMyAdmin admin interface reachable — test default creds and broken access control "
-                    + (
-                        "before SQLi or nuclei."
-                        if auth_required is False
-                        else "after confirming whether login is required."
-                    )
-                ),
+                "cve": entry["cve"],
+                "component": entry["component"],
+                "viable": viable,
+                "reasoning": f"{entry.get('summary', '')[:200]} — {reasoning}",
+                "source": entry.get("source", "live"),
+                "severity": entry.get("severity", ""),
             }
         )
+
+    if php_version:
+        major = _parse_version(php_version)
+        if major and major[0] < 8:
+            candidates.append(
+                {
+                    "cve": "EOL-runtime",
+                    "component": f"PHP {php_version}",
+                    "viable": "yes" if phpinfo_exposed else "maybe",
+                    "reasoning": (
+                        f"PHP {php_version} is below supported 8.x — missing security patches. "
+                        + (
+                            "Version confirmed via mapped disclosure page."
+                            if phpinfo_exposed
+                            else "Confirm runtime version on target before prioritizing."
+                        )
+                    ),
+                    "source": "version-analysis",
+                    "severity": "",
+                }
+            )
 
     if phpinfo_exposed or page_type == "phpinfo":
         candidates.append(
             {
-                "cve": "PII-phpinfo-disclosure",
+                "cve": "config-disclosure",
                 "component": "phpinfo()",
                 "viable": "yes",
                 "reasoning": (
-                    "phpinfo() exposes environment, paths, and extensions — high-value PII/config disclosure; "
-                    "reason locally before vulnerability_scanning."
+                    "phpinfo() mapped on target — paths, extensions, and environment variables exposed; "
+                    "prioritize over generic vulnerability_scanning."
                 ),
+                "source": "exposure-analysis",
+                "severity": "",
+            }
+        )
+
+    if phpmyadmin_detected and auth_required is False:
+        candidates.append(
+            {
+                "cve": "broken-access",
+                "component": "phpMyAdmin",
+                "viable": "yes",
+                "reasoning": (
+                    "phpMyAdmin interface reachable without authentication — broken access control class; "
+                    "test in-scope before SQLi or directory scanning."
+                ),
+                "source": "exposure-analysis",
+                "severity": "",
             }
         )
 
@@ -148,5 +130,6 @@ def analyze_stack_cve_viability(
         "url": url,
         "stack_cve_candidates": candidates,
         "stack_cve_viability_checked": bool(candidates),
+        "live_cve_lookup": bool(live_entries),
         "conclusions": conclusions,
     }

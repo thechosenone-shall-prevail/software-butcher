@@ -244,6 +244,7 @@ class SmartHttpTransport:
             chain = []
             while hops <= max_hops:
                 last = self._single_request(current, method, profile, timeout=timeout, max_body=max_body)
+                hop_body = last.body or ""
                 chain.append(
                     {
                         "method": method,
@@ -252,6 +253,14 @@ class SmartHttpTransport:
                         "status": last.status_code,
                         "location": last.headers.get("Location"),
                         "proxy": last.proxy,
+                        # Body of THIS hop's response. Redirect (3xx) hops normally
+                        # ship a tiny stub body; a large/structured body here is the
+                        # "auth check ran after render" leak signal. Kept in-memory
+                        # only (callers persist computed signals, not raw bodies).
+                        "body": hop_body,
+                        "body_len": len(hop_body),
+                        "content_type": last.headers.get("Content-Type") or last.headers.get("content-type") or "",
+                        "content_length": last.headers.get("Content-Length") or last.headers.get("content-length") or "",
                     }
                 )
                 if last.rate_limit and last.rate_limit.detected:
