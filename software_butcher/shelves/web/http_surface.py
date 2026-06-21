@@ -17,6 +17,7 @@ from software_butcher.core.adapter import AdapterCapability, AdapterRequest, Ada
 from software_butcher.core.url_utils import base_web_url, host_key, same_origin
 from software_butcher.shelves.hexstrike.interpreter import HexStrikeInterpreter
 from software_butcher.shelves.web.browser_nav import browser_navigate
+from software_butcher.shelves.web.content_intel import analyze_page_content
 from software_butcher.shelves.web.http_transport import SmartHttpTransport, TransportConfig
 from software_butcher.shelves.web.infrastructure_intel import InfrastructureProfile, analyze_infrastructure
 from software_butcher.state.transport_state import TransportState
@@ -255,15 +256,23 @@ def map_http_surface(
             if probe_url.rstrip("/").lower() in seen:
                 continue
             probe = transport.follow_redirects(probe_url, "GET", profile="browser", host=host)
+            probe_title = extract_title(probe.body)
+            content = analyze_page_content(
+                probe_url,
+                headers=probe.headers,
+                body=probe.body,
+                title=probe_title,
+            )
             semantic_probes.append(
                 {
                     "url": probe_url,
                     "token": cand["token"],
                     "status_code": probe.status_code,
-                    "title": extract_title(probe.body),
+                    "title": probe_title,
                     "score": cand["score"],
                     "rationale": cand["rationale"],
                     "reachable": probe.status_code is not None and probe.status_code < 400,
+                    "content_analysis": content,
                 }
             )
             if probe.status_code is not None and probe.status_code < 400:
@@ -271,6 +280,19 @@ def map_http_surface(
                 if normalized not in seen:
                     seen.add(normalized)
                     discovered.append(normalized)
+
+    content_pages: list[dict[str, Any]] = []
+    root_content = analyze_page_content(
+        curl_final,
+        headers=headers,
+        body=html,
+        title=title,
+    )
+    content_pages.append(root_content)
+
+    for probe in semantic_probes:
+        if probe.get("content_analysis"):
+            content_pages.append(probe["content_analysis"])
 
     scored_urls: list[dict[str, Any]] = []
     prioritized: list[str] = []
@@ -300,6 +322,7 @@ def map_http_surface(
         "page_summary": page_summary,
         "stack_landing": stack_landing,
         "semantic_probes": semantic_probes,
+        "content_pages": content_pages,
         "discovered_urls": prioritized,
         "all_discovered_urls": discovered,
         "scored_urls": scored_urls,
@@ -432,9 +455,19 @@ class HttpSurfaceAdapter:
         if surface.get("page_summary"):
             evidence.append(f"page_summary={surface['page_summary'][:200]}")
 
+        for page in surface.get("content_pages") or []:
+            for conclusion in page.get("conclusions") or []:
+                evidence.append(f"content_conclusion={conclusion}")
+            if page.get("text_preview"):
+                evidence.append(f"view_source_preview={page['text_preview'][:300]}")
+            if page.get("php_version"):
+                evidence.append(f"php_version={page['php_version']}")
+
         rate_limit = infra.get("rate_limit")
+        root_content = (surface.get("content_pages") or [{}])[0] if surface.get("content_pages") else {}
         metadata: dict[str, Any] = {
             "capability": "http_surface_map",
+            "content_analysis": True,
             "mapped_target": surface.get("target"),
             "technologies": list(surface.get("technologies") or []),
             "endpoints": list(surface.get("discovered_urls") or []),
@@ -450,6 +483,7 @@ class HttpSurfaceAdapter:
             "page_summary": surface.get("page_summary"),
             "stack_landing": stack_landing,
             "semantic_probes": surface.get("semantic_probes"),
+            "content_pages": surface.get("content_pages"),
             "scored_urls": surface.get("scored_urls"),
             "all_discovered_urls": surface.get("all_discovered_urls"),
         }

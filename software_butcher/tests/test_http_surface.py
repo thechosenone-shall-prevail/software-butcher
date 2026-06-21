@@ -203,3 +203,37 @@ def test_surface_map_marks_recon_complete_when_redirect_changes_final_url():
         base_target="http://hallbooking.srmrmp.edu.in",
     )
     assert checklist.is_complete("hallbooking.srmrmp.edu.in")
+
+
+@patch("software_butcher.shelves.web.http_surface.browser_navigate")
+@patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.follow_redirects")
+@patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.probe_cache_behavior", return_value={})
+def test_xampp_landing_does_not_probe_hardcoded_admin_paths(mock_cache, mock_follow, _mock_well_known, _mock_browser):
+    """Admin panels must come from organic discovery, not a fixed path list."""
+    _mock_browser.return_value = MagicMock(
+        success=False, final_url="", title="", redirect_chain=[], discovered_urls=[], error="disabled",
+    )
+    _mock_browser.return_value.to_dict.return_value = {}
+
+    xampp_html = (
+        '<html><head><title>Welcome to XAMPP</title></head>'
+        '<body>XAMPP for Linux — phpMyAdmin available.</body></html>'
+    )
+    response = _resp(
+        "http://example.com/dashboard/",
+        body=xampp_html,
+        headers={"Server": "Apache"},
+    )
+    mock_follow.return_value = response
+
+    surface = map_http_surface("http://example.com", use_browser=False)
+    assert surface["stack_landing"]["detected"] is True
+
+    probed_urls = [call.args[0] for call in mock_follow.call_args_list]
+    assert not any("/phpmyadmin" in u for u in probed_urls)
+    assert not any("/dashboard/phpinfo.php" in u for u in probed_urls)
+
+    semantic_urls = [p["url"] for p in surface.get("semantic_probes") or []]
+    assert not any("/phpmyadmin" in u for u in semantic_urls)
+    assert not any("/dashboard/phpinfo.php" in u for u in semantic_urls)

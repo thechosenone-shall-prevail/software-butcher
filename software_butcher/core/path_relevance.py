@@ -11,12 +11,13 @@ NOISE_PATH_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"/dashboard/(de|fr|es|pl|zh_|ja|tr|pt|ro|ru|it|hu|pt_br)/?$", re.I),
     re.compile(r"/dashboard/Images/?$", re.I),
     re.compile(r"/dashboard/docs/", re.I),
-    re.compile(r"/dashboard/phpinfo\.php$", re.I),
     re.compile(r"privacy_policy\.html$", re.I),
     re.compile(r"/licenses/", re.I),
     re.compile(r"/webalizer/", re.I),
     re.compile(r"/icons/", re.I),
     re.compile(r"\.(png|jpe?g|gif|svg|ico|css|js|woff2?)$", re.I),
+    re.compile(r"/(css|js|Images|images|vendor|assets|static)/?$", re.I),
+    re.compile(r"/hall/(css|js|Images|vendor|PHP)/?$", re.I),
 )
 
 # Paths that likely belong to the actual engagement application
@@ -67,14 +68,15 @@ def score_path(url: str, *, title: str = "", page_context: str = "") -> float:
         if signal in path or signal in text:
             score = max(score, 0.92 if signal == "hall" else 0.85)
 
-    # phpMyAdmin: security-relevant but not the booking app — medium priority
     if "phpmyadmin" in path:
-        return 0.55
+        score = max(score, 0.93)
+    if "phpinfo" in path:
+        score = max(score, 0.95)
 
     if path.rstrip("/") == "/dashboard":
         return 0.15
 
-    if path.startswith("/dashboard/"):
+    if path.startswith("/dashboard/") and "phpinfo" not in path:
         return 0.12
 
     if path.endswith(".html") and "/dashboard" not in path:
