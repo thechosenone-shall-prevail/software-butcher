@@ -37,6 +37,22 @@ _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = True
 _SSL_CTX.verify_mode = ssl.CERT_REQUIRED
 
+ROBOTS_SITEMAP_RE = re.compile(r"^Sitemap:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
+ROBOTS_PATH_RE = re.compile(r"^(?:Allow|Disallow):\s*(/\S*)", re.IGNORECASE | re.MULTILINE)
+SITEMAP_LOC_RE = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.IGNORECASE)
+WELL_KNOWN_PATHS = ("/robots.txt", "/sitemap.xml")
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        return None
+
+
+_HTTP_OPENER = urllib.request.build_opener(
+    _NoRedirectHandler,
+    urllib.request.HTTPSHandler(context=_SSL_CTX),
+)
+
 
 def _normalize_url(url: str) -> str:
     parsed = urllib.parse.urlsplit(url.strip())
@@ -59,7 +75,7 @@ def _request(
     req.add_header("Accept", "*/*")
     t0 = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
+        with _HTTP_OPENER.open(req, timeout=timeout) as resp:
             body = resp.read(max_body)
             headers = {k: v for k, v in resp.headers.items()}
             return {
@@ -147,6 +163,84 @@ def extract_title(html: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _absolute_url(base: str, href: str) -> str | None:
+    href = (href or "").strip()
+    if not href or href.startswith(("javascript:", "mailto:", "data:", "#")):
+        return None
+    parsed_base = urllib.parse.urlsplit(base)
+    origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    if href.startswith(("http://", "https://")):
+        absolute = href.rstrip("/")
+    elif href.startswith("/"):
+        absolute = origin + href.rstrip("/")
+    else:
+        absolute = urllib.parse.urljoin(base, href).rstrip("/")
+    if not same_origin(absolute, base):
+        return None
+    return absolute
+
+
+def _urls_from_redirect_chain(chain: list[dict[str, Any]], base: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for hop in chain:
+        for candidate in (hop.get("url"), hop.get("location")):
+            if not candidate:
+                continue
+            absolute = _absolute_url(base, str(candidate))
+            if absolute and absolute not in seen:
+                seen.add(absolute)
+                urls.append(absolute)
+    return urls
+
+
+def _parse_robots_txt(body: str, base: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in ROBOTS_SITEMAP_RE.finditer(body or ""):
+        absolute = _absolute_url(base, match.group(1).strip())
+        if absolute and absolute not in seen:
+            seen.add(absolute)
+            urls.append(absolute)
+    for match in ROBOTS_PATH_RE.finditer(body or ""):
+        path = match.group(1).strip()
+        if not path or path == "/":
+            continue
+        absolute = _absolute_url(base, path)
+        if absolute and absolute not in seen:
+            seen.add(absolute)
+            urls.append(absolute)
+    return urls
+
+
+def _parse_sitemap_xml(body: str, base: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in SITEMAP_LOC_RE.finditer(body or ""):
+        absolute = _absolute_url(base, match.group(1).strip())
+        if absolute and absolute not in seen:
+            seen.add(absolute)
+            urls.append(absolute)
+    return urls
+
+
+def _fetch_well_known_urls(base: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for path in WELL_KNOWN_PATHS:
+        target = urllib.parse.urljoin(base.rstrip("/") + "/", path.lstrip("/"))
+        resp = _request(target, "GET")
+        if resp.get("status_code") != 200:
+            continue
+        body = resp.get("body") or ""
+        parsed = _parse_robots_txt(body, base) if path.endswith("robots.txt") else _parse_sitemap_xml(body, base)
+        for url in parsed:
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
 def map_http_surface(url: str) -> dict[str, Any]:
     """Run HEAD + GET surface map and return structured observation."""
     base = base_web_url(url)
@@ -159,8 +253,16 @@ def map_http_surface(url: str) -> dict[str, Any]:
     final_url = get_resp.get("final_url") or base
     interpreter = HexStrikeInterpreter()
     links = interpreter.extract_html_links(final_url, html) if html else []
+    redirect_urls = _urls_from_redirect_chain(get_chain, base)
+    well_known_urls = _fetch_well_known_urls(base)
 
-    same_origin_links = [link for link in links if same_origin(link, base)]
+    discovered: list[str] = []
+    seen: set[str] = set()
+    for link in (*redirect_urls, *links, *well_known_urls):
+        if same_origin(link, base) and link not in seen:
+            seen.add(link)
+            discovered.append(link)
+
     title = extract_title(html)
 
     return {
@@ -172,7 +274,7 @@ def map_http_surface(url: str) -> dict[str, Any]:
         "headers": headers,
         "technologies": technologies,
         "title": title,
-        "discovered_urls": same_origin_links,
+        "discovered_urls": discovered,
         "error": get_resp.get("error") or head.get("error"),
         "success": get_resp.get("status_code") is not None or bool(head.get("status_code")),
     }
@@ -239,7 +341,7 @@ class HttpSurfaceAdapter:
                 f"HTTP surface mapped for {surface.get('target')}: "
                 f"{len(headers)} response headers, {len(surface.get('discovered_urls') or [])} same-origin links."
             ),
-            "path": surface.get("final_url") or surface.get("target"),
+            "path": surface.get("target") or surface.get("final_url"),
             "provenance": "http_surface:map",
             "status": "hypothesis",
             "confidence": 0.72 if surface.get("success") else 0.35,
@@ -248,6 +350,7 @@ class HttpSurfaceAdapter:
             "capability": "http_surface_map",
             "metadata": {
                 "capability": "http_surface_map",
+                "mapped_target": surface.get("target"),
                 "technologies": list(surface.get("technologies") or []),
                 "endpoints": list(surface.get("discovered_urls") or []),
                 "discovered_urls": list(surface.get("discovered_urls") or []),

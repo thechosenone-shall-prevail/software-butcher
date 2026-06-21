@@ -15,7 +15,29 @@ class HexStrikeInterpreter:
     OPEN_PORT_RE = re.compile(r"(?P<port>\d+)/(tcp|udp)\s+open\s+(?P<service>[A-Za-z0-9_\-./]+)", re.IGNORECASE)
     URL_RE = re.compile(r"https?://[^\s\"'<>]+")
     PATH_RE = re.compile(r"(?<!\w)/(?:[A-Za-z0-9._~!$&'()*+,;=:@%-]+/)*[A-Za-z0-9._~!$&'()*+,;=:@%-]*")
-    HTML_LINK_RE = re.compile(r'(?:href|src|action)=["\']([^"\'#?][^"\']*)["\']', re.IGNORECASE)
+    HTML_LINK_RE = re.compile(
+        r'(?:href|src|action|formaction|data-url|data-href)=["\']([^"\'#?][^"\']*)["\']',
+        re.IGNORECASE,
+    )
+    BASE_HREF_RE = re.compile(
+        r'<base[^>]+href=["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    )
+    META_REFRESH_RE = re.compile(
+        r'<meta[^>]+http-equiv=["\']refresh["\'][^>]+content=["\'][^"\']*url=([^"\';>]+)',
+        re.IGNORECASE,
+    )
+    META_REFRESH_RE_ALT = re.compile(
+        r'<meta[^>]+content=["\'][^"\']*url=([^"\';>]+)[^"\']*["\'][^>]+http-equiv=["\']refresh["\']',
+        re.IGNORECASE,
+    )
+    INLINE_JS_PATH_RE = re.compile(
+        r"""["'](?P<path>/[A-Za-z0-9._~!$&'()*+,;=:@%-]{1,120})["']""",
+    )
+    INLINE_JS_LOCATION_RE = re.compile(
+        r"""location(?:\.href)?\s*=\s*["'](?P<path>[^"'#?]+)["']""",
+        re.IGNORECASE,
+    )
 
     def interpret(self, target: str, tool: str, output: str, asset_type: str) -> list[dict]:
         findings: list[dict] = []
@@ -101,38 +123,61 @@ class HexStrikeInterpreter:
 
         return findings
 
-    def extract_html_links(self, base_url: str, html: str) -> list[str]:
-        """Extract unique absolute URLs from HTML href/src/action attributes.
+    @staticmethod
+    def _resolve_html_url(raw_href: str, base_url: str, base_origin: str) -> str | None:
+        href = raw_href.strip()
+        if not href or href.startswith(("javascript:", "mailto:", "data:", "#")):
+            return None
+        if href.startswith(("http://", "https://")):
+            absolute = href.rstrip("/")
+        elif href.startswith("/"):
+            absolute = base_origin + href.rstrip("/")
+        else:
+            absolute = urljoin(base_url, href).rstrip("/")
+        if base_origin and not absolute.startswith(base_origin):
+            return None
+        if is_static_asset(absolute):
+            return None
+        return absolute
 
-        Returns up to 30 interactive (non-static) URLs found in the page,
-        resolving relative paths against *base_url* and staying on the same
-        origin.  Static assets (CSS, JS, images, fonts, etc.) are excluded —
-        they have their own asset_type and must not be crawled as endpoints.
+    def extract_html_links(self, base_url: str, html: str) -> list[str]:
+        """Extract unique same-origin interactive URLs from HTML and inline JS.
+
+        Parses anchor/form/iframe attributes, ``<base href>``, meta refresh targets,
+        and conservative inline JS path strings. Static assets are excluded.
         """
         parsed_base = urlsplit(base_url)
         base_origin = f"{parsed_base.scheme}://{parsed_base.netloc}"
+        resolve_base = base_url
+        base_match = self.BASE_HREF_RE.search(html or "")
+        if base_match:
+            resolved_base = self._resolve_html_url(base_match.group(1), base_url, base_origin)
+            if resolved_base:
+                resolve_base = resolved_base if resolved_base.endswith("/") else f"{resolved_base}/"
 
         seen: set[str] = set()
         links: list[str] = []
-        for match in self.HTML_LINK_RE.finditer(html):
-            href = match.group(1).strip()
-            if not href or href.startswith(("javascript:", "mailto:", "data:", "#")):
-                continue
-            if href.startswith(("http://", "https://")):
-                absolute = href.rstrip("/")
-            elif href.startswith("/"):
-                absolute = base_origin + href.rstrip("/")
-            else:
-                absolute = urljoin(base_url, href).rstrip("/")
-            # Skip external origins to stay on-target
-            if base_origin and not absolute.startswith(base_origin):
-                continue
-            # Skip static assets — they are not crawlable endpoints
-            if is_static_asset(absolute):
-                continue
-            if absolute not in seen:
-                seen.add(absolute)
-                links.append(absolute)
-            if len(links) >= 30:
-                break
+
+        def add_link(raw_href: str) -> bool:
+            absolute = self._resolve_html_url(raw_href, resolve_base, base_origin)
+            if not absolute or absolute in seen:
+                return len(links) >= 30
+            seen.add(absolute)
+            links.append(absolute)
+            return len(links) >= 30
+
+        for match in self.HTML_LINK_RE.finditer(html or ""):
+            if add_link(match.group(1)):
+                return links
+
+        for pattern in (self.META_REFRESH_RE, self.META_REFRESH_RE_ALT):
+            for match in pattern.finditer(html or ""):
+                if add_link(match.group(1)):
+                    return links
+
+        for pattern in (self.INLINE_JS_PATH_RE, self.INLINE_JS_LOCATION_RE):
+            for match in pattern.finditer(html or ""):
+                if add_link(match.group("path")):
+                    return links
+
         return links

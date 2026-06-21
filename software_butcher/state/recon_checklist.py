@@ -95,7 +95,14 @@ def record_recon_progress(
     host = host_key(finding.path)
     if capability in HOST_LEVEL_RECON_CAPABILITIES:
         root = base_web_url(base_target or finding.path).rstrip("/")
-        if finding.path.rstrip("/").lower() != root.lower() and not is_root_surface_url(finding.path):
+        mapped_target = str((finding.metadata or {}).get("mapped_target", "")).rstrip("/")
+        finding_path = finding.path.rstrip("/")
+        is_root_mapping = (
+            finding_path.lower() == root.lower()
+            or is_root_surface_url(finding.path)
+            or mapped_target.lower() == root.lower()
+        )
+        if not is_root_mapping:
             return
 
     if capability in REQUIRED_RECON_CAPABILITIES or capability == "directory_bruteforce":

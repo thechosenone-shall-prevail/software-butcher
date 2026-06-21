@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from software_butcher.core.domain_seed import build_domain_seed_hypotheses
 from software_butcher.core.assets import Asset
+from software_butcher.shelves.hexstrike.interpreter import HexStrikeInterpreter
 from software_butcher.shelves.web.http_surface import (
     HttpSurfaceAdapter,
     infer_technologies,
@@ -26,8 +27,30 @@ def test_domain_seed_single_surface_map_hypothesis():
     assert hyps[0].metadata["intent"] == "http_surface_map"
 
 
+def test_extract_html_links_parses_forms_meta_base_and_js():
+    interpreter = HexStrikeInterpreter()
+    html = """
+    <html><head>
+      <base href="http://example.com/app/">
+      <meta http-equiv="refresh" content="0;url=/portal">
+    </head><body>
+      <form action="submit.php"><input formaction="save.php"></form>
+      <iframe src="/embedded"></iframe>
+      <script>var next = "/reports"; location.href='/admin';</script>
+    </body></html>
+    """
+    links = interpreter.extract_html_links("http://example.com/", html)
+    assert "http://example.com/portal" in links
+    assert "http://example.com/app/submit.php" in links
+    assert "http://example.com/app/save.php" in links
+    assert "http://example.com/embedded" in links
+    assert "http://example.com/reports" in links
+    assert "http://example.com/admin" in links
+
+
+@patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
 @patch("software_butcher.shelves.web.http_surface._request")
-def test_map_http_surface_collects_headers_and_links(mock_request):
+def test_map_http_surface_collects_headers_and_links(mock_request, _mock_well_known):
     def fake_request(url, method="GET", **kwargs):
         if method == "HEAD":
             return {
@@ -63,6 +86,67 @@ def test_map_http_surface_collects_headers_and_links(mock_request):
     assert any("header:Server=" in e for f in result.findings for e in f.get("evidence", []))
 
 
+@patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
+@patch("software_butcher.shelves.web.http_surface._request")
+def test_map_http_surface_includes_redirect_chain_urls(mock_request, _mock_well_known):
+    responses = {
+        "http://example.com/": {
+            "success": False,
+            "status_code": 302,
+            "url": "http://example.com/",
+            "final_url": "http://example.com/",
+            "elapsed_s": 0.1,
+            "headers": {"Location": "/dashboard/"},
+            "body": "",
+            "error": "HTTP 302: Found",
+        },
+        "http://example.com/dashboard/": {
+            "success": True,
+            "status_code": 200,
+            "url": "http://example.com/dashboard/",
+            "final_url": "http://example.com/dashboard/",
+            "elapsed_s": 0.2,
+            "headers": {"Server": "Apache"},
+            "body": '<html><body><a href="/faq.html">FAQ</a></body></html>',
+            "error": None,
+        },
+    }
+
+    def fake_request(url, method="GET", **kwargs):
+        return responses[url]
+
+    mock_request.side_effect = fake_request
+    surface = map_http_surface("http://example.com")
+    assert surface["final_url"] == "http://example.com/dashboard/"
+    assert len(surface["get_chain"]) == 2
+    assert surface["get_chain"][0]["status"] == 302
+    assert "http://example.com/dashboard" in surface["discovered_urls"]
+    assert "http://example.com/faq.html" in surface["discovered_urls"]
+
+
+@patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls")
+@patch("software_butcher.shelves.web.http_surface._request")
+def test_map_http_surface_fetches_robots_and_sitemap(mock_request, mock_well_known):
+    mock_well_known.return_value = ["http://example.com/hidden"]
+
+    def fake_request(url, method="GET", **kwargs):
+        return {
+            "success": True,
+            "status_code": 200,
+            "url": url,
+            "final_url": url,
+            "elapsed_s": 0.1,
+            "headers": {},
+            "body": "<html></html>",
+            "error": None,
+        }
+
+    mock_request.side_effect = fake_request
+    surface = map_http_surface("http://example.com")
+    assert "http://example.com/hidden" in surface["discovered_urls"]
+    mock_well_known.assert_called_once()
+
+
 def test_surface_map_marks_recon_complete_on_root():
     checklist = ReconChecklist()
     record_recon_progress(
@@ -71,7 +155,25 @@ def test_surface_map_marks_recon_complete_on_root():
             path="http://hallbooking.srmrmp.edu.in",
             hypothesis="surface",
             provenance="http_surface:map",
-            metadata={"capability": "http_surface_map"},
+            metadata={"capability": "http_surface_map", "mapped_target": "http://hallbooking.srmrmp.edu.in"},
+        ),
+        base_target="http://hallbooking.srmrmp.edu.in",
+    )
+    assert checklist.is_complete("hallbooking.srmrmp.edu.in")
+
+
+def test_surface_map_marks_recon_complete_when_redirect_changes_final_url():
+    checklist = ReconChecklist()
+    record_recon_progress(
+        checklist,
+        Finding(
+            path="http://hallbooking.srmrmp.edu.in/dashboard/",
+            hypothesis="surface",
+            provenance="http_surface:map",
+            metadata={
+                "capability": "http_surface_map",
+                "mapped_target": "http://hallbooking.srmrmp.edu.in",
+            },
         ),
         base_target="http://hallbooking.srmrmp.edu.in",
     )
