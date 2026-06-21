@@ -8,6 +8,7 @@ tool categories on the HexStrike server.
 from __future__ import annotations
 
 from software_butcher.core.asset_classifier import is_static_asset
+from software_butcher.core.meta_utils import as_dict, as_dict_list
 from software_butcher.core.path_relevance import is_noise_path, score_path
 from software_butcher.state.engagement import normalize_engagement_type
 from software_butcher.core.url_utils import base_web_url
@@ -291,7 +292,7 @@ class HypothesisGenerator:
         capability = finding.metadata.get("capability") if finding.metadata else None
 
         # Default stack at root (XAMPP) — real app is elsewhere; read content before scanners
-        stack_landing = (finding.metadata or {}).get("stack_landing") or {}
+        stack_landing = as_dict((finding.metadata or {}).get("stack_landing"))
         if capability == "http_surface_map" and stack_landing.get("detected"):
             base = base_web_url(finding.path)
             ctx = str((finding.metadata or {}).get("engagement_context") or "")
@@ -392,6 +393,30 @@ class HypothesisGenerator:
         # resource exhaustion, and version-gated CVE viability.
         if capability == "http_surface_map" and not is_noise_path(finding.path):
             generated.extend(self._web_audit_followups(finding, meta))
+            analyzed_urls = {
+                str(p.get("url", "")).rstrip("/").lower()
+                for p in meta.get("content_pages") or []
+                if p.get("url")
+            }
+            for url in as_dict(meta.get("app_expand")).get("expanded_urls") or []:
+                url_s = str(url)
+                key = url_s.rstrip("/").lower()
+                if key in analyzed_urls or is_noise_path(url_s):
+                    continue
+                generated.append(
+                    Hypothesis(
+                        path=url_s,
+                        reason="Organic app link discovered — map content, forms, and redirect behavior.",
+                        source_finding_id=finding.id,
+                        priority=0.93,
+                        metadata={
+                            "intent": "http_surface_map",
+                            "asset_type": "web_endpoint",
+                            "generated_by": "app_link_expand",
+                            "organically_discovered": True,
+                        },
+                    )
+                )
 
         if capability == "auth_bypass_confirmed":
             # Walk up to the site root for authenticated crawling
@@ -446,7 +471,7 @@ class HypothesisGenerator:
 
         content_pages = meta.get("content_pages") or []
 
-        # Redirect-body leak (Cursor's #1/#2 confirmed class) — highest value.
+        # Redirect-body leak (auth-after-render) — per mapped URL, including organic expansion pages.
         if meta.get("redirect_body_leak_suspected"):
             _seed(
                 "redirect_body_audit",
@@ -454,6 +479,35 @@ class HypothesisGenerator:
                 0.94,
                 "redirect_audit",
                 focus="redirect_body",
+            )
+
+        for page in content_pages:
+            page_url = str(page.get("url") or "")
+            if not page_url:
+                continue
+            page_leak = bool(page.get("redirect_body_leak_suspected")) or any(
+                entry.get("leak_suspected")
+                for entry in as_dict_list(page.get("redirect_observations"))
+            )
+            if not page_leak:
+                continue
+            followups.append(
+                Hypothesis(
+                    path=page_url,
+                    reason=(
+                        "Redirect hop on this page returned a large/structured body — "
+                        "confirm auth-after-render data leak."
+                    ),
+                    source_finding_id=finding.id,
+                    priority=0.96,
+                    metadata={
+                        "intent": "redirect_body_audit",
+                        "asset_type": "web_endpoint",
+                        "generated_by": "redirect_audit",
+                        "analysis_focus": "redirect_body",
+                        "organically_discovered": True,
+                    },
+                )
             )
 
         # Security posture / CSRF — cheap deterministic audit on every mapped URL.

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Iterable
 from urllib.parse import urlsplit
 
+from software_butcher.core.meta_utils import as_dict, as_dict_list
 from software_butcher.core.path_relevance import detect_default_stack_landing, is_noise_path
 from software_butcher.core.url_utils import engagement_entry_url, host_key
 from software_butcher.state.schema import Finding, Hypothesis
@@ -63,7 +64,7 @@ def _collect_app_signals(findings: Iterable[Finding]) -> dict[str, dict[str, flo
 
     for finding in findings:
         meta = finding.metadata or {}
-        stack = meta.get("stack_landing") or {}
+        stack = as_dict(meta.get("stack_landing"))
         if stack.get("detected") and _normalize(finding.path) == _directory_root(finding.path):
             continue
 
@@ -198,17 +199,88 @@ def finding_drives_pcs_branching(
     app_root: ApplicationRoot | None,
     *,
     engagement_type: str = "assessment",
+    all_findings: Iterable[Finding] | None = None,
 ) -> bool:
     """Limit PCS branch spawning to app subtree + parallel stack infrastructure."""
+    findings_list = list(all_findings) if all_findings is not None else [finding]
     if engagement_type != "assessment" or app_root is None or app_root.confidence < 0.55:
         return True
+
+    pending = app_root_pending_urls(findings_list, app_root)
+    if pending and not _finding_under_root(finding, app_root):
+        if is_stack_host_surface(finding.path, findings_list):
+            return False
+        if as_dict((finding.metadata or {}).get("stack_landing")).get("detected"):
+            return False
+
     if _finding_under_root(finding, app_root):
         return True
-    if is_infrastructure_url(finding.path, [finding]):
+    if is_infrastructure_url(finding.path, findings_list):
         return True
-    meta = finding.metadata or {}
-    if (meta.get("stack_landing") or {}).get("detected"):
+    return False
+
+
+def _content_mapped_urls(findings: Iterable[Finding], app_root: ApplicationRoot) -> set[str]:
+    mapped: set[str] = set()
+    for finding in findings:
+        meta = finding.metadata or {}
+        for page in meta.get("content_pages") or []:
+            url = str(page.get("url") or "")
+            if not url_under_application_root(url, app_root):
+                continue
+            if page.get("conclusions") or page.get("form_count") is not None or page.get("page_type"):
+                mapped.add(_normalize(url))
+        path = finding.path
+        if url_under_application_root(path, app_root) and meta.get("content_analysis"):
+            mapped.add(_normalize(path))
+        mapped_target = str(meta.get("mapped_target") or "")
+        if mapped_target and url_under_application_root(mapped_target, app_root) and meta.get("content_analysis"):
+            mapped.add(_normalize(mapped_target))
+    return mapped
+
+
+def _discovered_app_urls(findings: Iterable[Finding], app_root: ApplicationRoot) -> set[str]:
+    discovered: set[str] = set()
+    for finding in findings:
+        meta = finding.metadata or {}
+        for page in meta.get("content_pages") or []:
+            url = str(page.get("url") or "")
+            if url_under_application_root(url, app_root):
+                discovered.add(_normalize(url))
+        for url in as_dict(meta.get("app_expand")).get("expanded_urls") or []:
+            url_s = str(url)
+            if url_under_application_root(url_s, app_root):
+                discovered.add(_normalize(url_s))
+        if url_under_application_root(finding.path, app_root):
+            discovered.add(_normalize(finding.path))
+    return discovered
+
+
+def app_root_pending_urls(findings: Iterable[Finding], app_root: ApplicationRoot) -> list[str]:
+    """App-subtree URLs seen organically but not yet content-mapped."""
+    mapped = _content_mapped_urls(findings, app_root)
+    pending = sorted(_discovered_app_urls(findings, app_root) - mapped)
+    return [url for url in pending if url]
+
+
+def is_stack_host_surface(url: str, findings: Iterable[Finding]) -> bool:
+    """Default stack / XAMPP dashboard surface — not the engagement application."""
+    if not any(as_dict((f.metadata or {}).get("stack_landing")).get("detected") for f in findings):
+        return False
+    target = _normalize(url)
+    parsed = urlsplit(url)
+    segments = [p for p in (parsed.path or "").split("/") if p]
+    if not segments:
         return True
+    if is_noise_path(url):
+        return True
+    if len(segments) == 1 and segments[0] == "dashboard":
+        return True
+    for finding in findings:
+        if _normalize(finding.path) != target:
+            continue
+        if as_dict((finding.metadata or {}).get("stack_landing")).get("detected"):
+            return True
     return False
 
 
@@ -240,7 +312,7 @@ def is_infrastructure_url(url: str, findings: Iterable[Finding]) -> bool:
         if page_type in INFRA_PAGE_TYPES:
             return True
 
-        stack = meta.get("stack_landing") or {}
+        stack = as_dict(meta.get("stack_landing"))
         if stack.get("detected"):
             title = str(meta.get("title") or "")
             body_hint = str(meta.get("page_summary") or "")
@@ -352,6 +424,9 @@ def hypothesis_in_application_scope(
     if _hypothesis_traces_to_app(hypothesis, app_root, findings):
         return True
 
+    if is_stack_host_surface(path, findings.values()) and not is_infrastructure_url(path, findings.values()):
+        return False
+
     if str(meta.get("generated_by") or "") in {"redirect_audit", "security_posture", "phpmyadmin_assess", "dos_viability"}:
         if url_under_application_root(path, app_root) or is_infrastructure_url(path, findings.values()):
             return True
@@ -380,10 +455,26 @@ def application_scope_priority_boost(
     findings: dict[str, Finding],
 ) -> float:
     """Queue ordering: prefer app subtree, then infrastructure, deprioritize host noise."""
-    if app_root is None:
+    if app_root is None or app_root.confidence < 0.55:
         return 0.0
+
+    meta = hypothesis.metadata or {}
+    generated_by = str(meta.get("generated_by") or "")
+    pending = {_normalize(u) for u in app_root_pending_urls(findings.values(), app_root)}
+    path_norm = _normalize(hypothesis.path)
+
     if url_under_application_root(hypothesis.path, app_root):
-        return 0.35
+        boost = 0.35
+        if generated_by in {"redirect_audit", "app_link_expand"}:
+            boost += 0.2
+        if path_norm in pending:
+            boost += 0.25
+        return boost
+
     if is_infrastructure_url(hypothesis.path, findings.values()):
-        return 0.0
+        return -0.25 if pending else 0.0
+
+    if is_stack_host_surface(hypothesis.path, findings.values()):
+        return -0.65
+
     return -0.5

@@ -14,6 +14,7 @@ from software_butcher.core.asset_classifier import is_static_asset
 from software_butcher.core.path_relevance import is_noise_path, score_path
 from software_butcher.core.url_utils import same_origin
 from software_butcher.shelves.hexstrike.interpreter import HexStrikeInterpreter
+from software_butcher.shelves.web.redirect_audit import chain_leak_suspected, summarize_redirect_chain
 from software_butcher.shelves.web.content_intel import analyze_page_content
 from software_butcher.shelves.web.http_transport import SmartHttpTransport
 
@@ -84,6 +85,11 @@ def expand_organic_app_links(
             title=title,
             nvd_api_key=nvd_api_key,
         )
+        chain = resp.redirect_chain or []
+        redirect_observations = summarize_redirect_chain(chain)
+        redirect_leak = chain_leak_suspected(chain)
+        content["redirect_observations"] = redirect_observations
+        content["redirect_body_leak_suspected"] = redirect_leak
         content_pages.append(content)
         analyzed_keys.add(key)
 

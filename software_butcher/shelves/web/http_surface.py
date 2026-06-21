@@ -329,7 +329,7 @@ def map_http_surface(
     max_expand_pages = int(expand_cfg.get("max_pages") or 15)
     max_expand_depth = int(expand_cfg.get("max_depth") or 2)
     entry_urls: list[str] = []
-    if curl_final and not stack_landing.get("detected"):
+    if curl_final:
         entry_urls.append(curl_final)
     for page in content_pages:
         if int(page.get("form_count") or 0) > 0 and page.get("url"):

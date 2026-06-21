@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from software_butcher.core.meta_utils import as_dict, as_dict_list
 from software_butcher.core.app_root import infer_application_root
 from software_butcher.state.convergence import recompute_clusters
 from software_butcher.state.schema import ConvergenceCluster, Finding
@@ -71,11 +72,13 @@ def build_brain_context(
                 extra += f" [content:{page_type}] {conclusions[0][:100]}"
             elif meta.get("php_version"):
                 extra += f" [PHP {meta['php_version']}]"
-        if meta.get("stack_landing", {}).get("detected"):
+        if as_dict(meta.get("stack_landing")).get("detected"):
             extra += " [XAMPP/default stack landing]"
         infra = meta.get("infrastructure")
         if isinstance(infra, dict) and infra.get("conclusions"):
             extra += f" | {infra['conclusions'][0][:80]}"
+        elif isinstance(infra, list) and infra:
+            extra += f" | {str(infra[0])[:80]}"
         lines.append(
             f"  - [{finding.status}] {finding.path} | theme={finding.cluster_theme} "
             f"conf={finding.confidence:.2f} emergent={finding.emergent_confidence:.2f} "

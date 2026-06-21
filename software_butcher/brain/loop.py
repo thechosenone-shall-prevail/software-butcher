@@ -27,6 +27,7 @@ from software_butcher.core.capability_priority import (
     is_assessment_deprioritized,
 )
 from software_butcher.core.path_relevance import is_noise_path, score_path
+from software_butcher.core.meta_utils import as_dict, as_dict_list
 from software_butcher.state.recon_checklist import HOST_LEVEL_RECON_CAPABILITIES, mark_host_recon
 from software_butcher.shelves.hexstrike.client import HexstrikeServerUnavailableError
 from software_butcher.state.path_graph import parent_path as compute_parent_path
@@ -323,10 +324,28 @@ def _url_redirect_leak_suspected(store: FindingStore, host: str, target_url: str
     for finding in _host_findings(store, host):
         meta = finding.metadata or {}
         if _normalize_url(finding.path) != target and _normalize_url(str(meta.get("mapped_target") or "")) != target:
+            for page in meta.get("content_pages") or []:
+                if _normalize_url(str(page.get("url") or "")) != target:
+                    continue
+                if page.get("redirect_body_leak_suspected"):
+                    return True
+                for entry in as_dict_list(page.get("redirect_observations")):
+                    if entry.get("leak_suspected"):
+                        return True
             continue
-        for entry in meta.get("redirect_observations") or []:
+        if meta.get("redirect_body_leak_suspected"):
+            return True
+        for entry in as_dict_list(meta.get("redirect_observations")):
             if entry.get("leak_suspected"):
                 return True
+        for page in meta.get("content_pages") or []:
+            if _normalize_url(str(page.get("url") or "")) != target:
+                continue
+            if page.get("redirect_body_leak_suspected"):
+                return True
+            for entry in as_dict_list(page.get("redirect_observations")):
+                if entry.get("leak_suspected"):
+                    return True
     return False
 
 
@@ -376,13 +395,12 @@ def _host_stack_landing_pending_app(store: FindingStore, host: str) -> bool:
     has_app_entry = False
     for finding in _host_findings(store, host):
         meta = finding.metadata or {}
-        stack = (meta.get("stack_landing") or {})
+        stack = as_dict(meta.get("stack_landing"))
         if stack.get("detected"):
             stack_detected = True
-        if meta.get("semantic_probes"):
-            for probe in meta["semantic_probes"]:
-                if probe.get("reachable"):
-                    has_app_entry = True
+        for probe in as_dict_list(meta.get("semantic_probes")):
+            if probe.get("reachable"):
+                has_app_entry = True
         if score_path(finding.path) >= 0.85 and not is_noise_path(finding.path):
             has_app_entry = True
         page_type = str(meta.get("page_type") or "")
@@ -1421,6 +1439,7 @@ class BrainLoop:
                     recon_complete=recon_ok,
                     app_root=self.store.application_root(),
                     engagement_type=getattr(self.store, "_engagement_type", "assessment"),
+                    all_findings=list(self.store.findings.values()),
                 )
                 branch_count = min(branch_count, self.max_branches)
                 if not recon_ok or not content_ok:

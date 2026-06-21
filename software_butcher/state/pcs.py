@@ -69,6 +69,7 @@ class ProgressiveConvergenceSearch:
         recon_complete: bool = True,
         app_root: ApplicationRoot | None = None,
         engagement_type: str = "assessment",
+        all_findings: list[Finding] | None = None,
     ) -> tuple[int, str]:
         """Return (branch_count, reason) for the next Brain step."""
         if self.state.validation_mode:
@@ -107,6 +108,7 @@ class ProgressiveConvergenceSearch:
             new_findings,
             app_root=app_root,
             engagement_type=engagement_type,
+            all_findings=all_findings,
         ):
             self.state.active_branches = min(MAX_BRANCHES, SPAWN_ON_EVIDENCE)
             self.state.total_spawned = max(self.state.total_spawned, self.state.active_branches)
@@ -128,6 +130,7 @@ class ProgressiveConvergenceSearch:
         *,
         app_root: ApplicationRoot | None = None,
         engagement_type: str = "assessment",
+        all_findings: list[Finding] | None = None,
     ) -> bool:
         if not findings:
             return False
@@ -136,6 +139,7 @@ class ProgressiveConvergenceSearch:
                 finding,
                 app_root,
                 engagement_type=engagement_type,
+                all_findings=all_findings or findings,
             ):
                 continue
             if finding.status == "confirmed":
