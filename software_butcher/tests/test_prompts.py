@@ -10,6 +10,13 @@ def test_brain_prompt_is_autonomous_not_ctf():
     assert "/admin" not in BRAIN_CAPABILITY_PROMPT
 
 
+def test_brain_prompt_emphasizes_content_before_scanners():
+    lowered = BRAIN_CAPABILITY_PROMPT.lower()
+    assert "view-source" in lowered or "ctrl+u" in lowered
+    assert "content_analysis" in lowered
+    assert "bugbounty_osint" not in BRAIN_CAPABILITY_PROMPT.split("3.")[1].split("4.")[0]
+
+
 def test_advisor_prompt_no_admin_bias():
     assert "/admin" not in ADVISOR_HYPOTHESIS_PROMPT
     assert "naming patterns" in ADVISOR_HYPOTHESIS_PROMPT.lower()

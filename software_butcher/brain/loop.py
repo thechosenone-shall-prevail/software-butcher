@@ -76,6 +76,27 @@ _INTENT_ADAPTER_MAP: dict[str, str] = {
     "continuous_fuzzing": "oss_fuzz",
 }
 
+_SCANNER_CAPABILITIES = frozenset({
+    "endpoint_discovery",
+    "directory_bruteforce",
+    "bugbounty_recon",
+    "bugbounty_osint",
+    "technology_fingerprint",
+    "vulnerability_scanning",
+})
+
+
+def _host_has_content_intel(store: FindingStore, host: str) -> bool:
+    if not host:
+        return False
+    host_l = host.lower()
+    for finding in store.findings.values():
+        if host_key(finding.path).lower() != host_l:
+            continue
+        if (finding.metadata or {}).get("content_analysis"):
+            return True
+    return False
+
 
 def _asset_from_hypothesis(hypothesis, fallback_asset: Asset | None = None) -> Asset:
     asset_type = hypothesis.metadata.get("asset_type", "unknown") if hypothesis.metadata else "unknown"
@@ -194,16 +215,57 @@ def _apply_path_relevance_gate(
     path_score = score_path(hypothesis.path)
     if path_score < 0.35 and hypothesis.path.rstrip("/") != base_web_url(store.base_target or hypothesis.path).rstrip("/"):
         sys.stderr.write(
-            f"[Brain] Low-relevance path {hypothesis.path} (score={path_score:.2f}) — prefer directory discovery.\n"
+            f"[Brain] Low-relevance path {hypothesis.path} (score={path_score:.2f}) — skipping surface remap.\n"
         )
         return PolicyDecision(
-            intent="directory_bruteforce",
-            asset=Asset(locator=base_web_url(store.base_target or hypothesis.path), asset_type=decision.asset.asset_type),
+            intent="continue_discovery",
+            asset=decision.asset,
             preferred_adapter="hexstrike",
-            reason="Low-relevance child path; host recon done — use directory discovery for unlinked apps.",
-            options={"capability": "directory_bruteforce"},
+            reason=f"Low-relevance child path (score={path_score:.2f}); read high-value pages first.",
+            options={"capability": "continue_discovery", "skip_execute": True},
         )
     return decision
+
+
+def _apply_scanner_gate(
+    store: FindingStore,
+    hypothesis,
+    decision: PolicyDecision,
+) -> PolicyDecision:
+    """Block generic HexStrike scanners until headers and page content are analyzed."""
+    if decision.asset.asset_type not in {"web_endpoint", "api", "domain", "unknown"}:
+        return decision
+
+    if (decision.options or {}).get("skip_execute"):
+        return decision
+
+    capability = str((decision.options or {}).get("capability") or decision.intent or "")
+    if capability not in _SCANNER_CAPABILITIES:
+        return decision
+
+    host = host_key(hypothesis.path)
+    if _host_has_content_intel(store, host):
+        return decision
+
+    recon_base = base_web_url(store.base_target or hypothesis.path).rstrip("/")
+    sys.stderr.write(
+        f"[Brain] Scanner gate on {host}: read headers and page content before {capability}\n"
+    )
+    return PolicyDecision(
+        intent="http_surface_map",
+        asset=Asset(
+            locator=recon_base,
+            asset_type=decision.asset.asset_type,
+            parent=decision.asset.parent,
+            metadata=decision.asset.metadata,
+        ),
+        preferred_adapter="http_surface",
+        reason=(
+            f"Host {host} lacks content_analysis findings — map headers and view-source "
+            f"before {capability}."
+        ),
+        options={"capability": "http_surface_map"},
+    )
 
 
 def _findings_from_adapter_result(
@@ -445,6 +507,7 @@ def run_brain_once(
 
     decision = _apply_recon_gate(store, hypothesis, decision, explicit_intent)
     decision = _apply_path_relevance_gate(store, hypothesis, decision)
+    decision = _apply_scanner_gate(store, hypothesis, decision)
 
     route = _route_for_decision(decision, router)
 
@@ -697,13 +760,14 @@ class BrainLoop:
             if self.adaptive_pcs:
                 recon_host = host_key((asset.locator if asset else "") or self.store.base_target)
                 recon_ok = self.store.recon_complete_for(recon_host) if recon_host else True
+                content_ok = _host_has_content_intel(self.store, recon_host) if recon_host else True
                 branch_count, pcs_reason = self.store.pcs.branches_for_step(
                     self.store.clusters,
                     wave_new_findings,
                     recon_complete=recon_ok,
                 )
                 branch_count = min(branch_count, self.max_branches)
-                if not recon_ok:
+                if not recon_ok or not content_ok:
                     branch_count = 1
             else:
                 branch_count, pcs_reason = self.max_branches, "fixed_branch_count"

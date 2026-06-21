@@ -199,13 +199,58 @@ class HypothesisGenerator:
         # path.  This is what unlocks post-auth surface like /dvwa/vulnerabilities/.
         capability = finding.metadata.get("capability") if finding.metadata else None
 
-        # Default stack at root (XAMPP) — real app is elsewhere; discover paths organically
+        # Default stack at root (XAMPP) — real app is elsewhere; read content before scanners
         stack_landing = (finding.metadata or {}).get("stack_landing") or {}
         if capability == "http_surface_map" and stack_landing.get("detected"):
             base = base_web_url(finding.path)
             ctx = str((finding.metadata or {}).get("engagement_context") or "")
+            content_pages = (finding.metadata or {}).get("content_pages") or []
+            analyzed_urls = {str(p.get("url", "")).rstrip("/").lower() for p in content_pages}
+
+            for page in content_pages:
+                url = str(page.get("url") or "")
+                if not url or is_noise_path(url):
+                    continue
+                page_type = str(page.get("page_type") or "html")
+                if page_type in ("phpinfo", "phpmyadmin"):
+                    generated.append(
+                        Hypothesis(
+                            path=url,
+                            reason=(
+                                f"{page_type} reachable — analyze login, disclosure, and session behavior "
+                                "before generic scanners."
+                            ),
+                            source_finding_id=finding.id,
+                            priority=0.99,
+                            metadata={
+                                "intent": "web_behavior_analysis",
+                                "asset_type": "web_endpoint",
+                                "generated_by": "content_intel",
+                            },
+                        )
+                    )
+                elif score_path(url) >= 0.85:
+                    generated.append(
+                        Hypothesis(
+                            path=url,
+                            reason=(
+                                "Application entry identified from content read — analyze forms, auth, "
+                                "and dynamic behavior before scanners."
+                            ),
+                            source_finding_id=finding.id,
+                            priority=0.92,
+                            metadata={
+                                "intent": "web_behavior_analysis",
+                                "asset_type": "web_endpoint",
+                                "generated_by": "content_intel",
+                            },
+                        )
+                    )
+
             for cand in semantic_path_candidates(base, engagement_context=ctx):
                 url = str(cand["url"])
+                if url.rstrip("/").lower() in analyzed_urls:
+                    continue
                 if score_path(url) < 0.5:
                     continue
                 generated.append(
@@ -222,38 +267,9 @@ class HypothesisGenerator:
                         },
                     )
                 )
-            generated.append(
-                Hypothesis(
-                    path=base,
-                    reason=(
-                        "Search-indexed paths may exist off-root (e.g. Google site: results). "
-                        "Run OSINT workflow to discover indexed URLs not linked from homepage."
-                    ),
-                    source_finding_id=finding.id,
-                    priority=0.96,
-                    metadata={
-                        "intent": "bugbounty_osint",
-                        "asset_type": "web_endpoint",
-                        "generated_by": "search_index_osint",
-                    },
-                )
-            )
-            generated.append(
-                Hypothesis(
-                    path=base,
-                    reason=stack_landing.get("conclusion") or "Default stack landing detected; discover unlinked application paths.",
-                    source_finding_id=finding.id,
-                    priority=0.94,
-                    metadata={
-                        "intent": "directory_bruteforce",
-                        "asset_type": "web_endpoint",
-                        "generated_by": "stack_mismatch",
-                    },
-                )
-            )
             if finding.metadata.get("browser_final_url"):
                 bf = str(finding.metadata["browser_final_url"])
-                if score_path(bf) >= 0.5:
+                if score_path(bf) >= 0.5 and not is_noise_path(bf):
                     generated.append(
                         Hypothesis(
                             path=bf,

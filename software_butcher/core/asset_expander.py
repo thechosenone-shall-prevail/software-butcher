@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from software_butcher.core.asset_classifier import classify_url_asset_type, file_extension, is_static_asset
-from software_butcher.core.path_relevance import priority_for_score, score_path, should_queue_path
+from software_butcher.core.path_relevance import is_noise_path, priority_for_score, score_path, should_queue_path
 from software_butcher.core.assets import Asset, AssetInventory
 from software_butcher.core.binary_acquisition import BinaryAcquisition
 from software_butcher.core.classifier import BINARY_SUFFIXES, classify_target
@@ -180,6 +180,8 @@ class AssetExpander:
             new_assets.append(asset)
 
             if seed_hypotheses and hypothesis_queue is not None:
+                if is_noise_path(locator):
+                    continue
                 title_hint = str((finding.metadata or {}).get("title") or "")
                 page_hint = str((finding.metadata or {}).get("page_summary") or "")
                 if not should_queue_path(locator, title=title_hint, page_context=page_hint):

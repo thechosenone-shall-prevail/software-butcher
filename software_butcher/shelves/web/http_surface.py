@@ -36,6 +36,7 @@ TECHNOLOGY_HEADERS = (
 )
 TITLE_RE = re.compile(r"<title[^>]*>([^<]{1,200})</title>", re.IGNORECASE)
 WELL_KNOWN_PATHS = ("/robots.txt", "/sitemap.xml")
+ADMIN_PROBE_PATHS = ("/phpmyadmin", "/dashboard/phpinfo.php")
 ROBOTS_SITEMAP_RE = re.compile(r"^Sitemap:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
 ROBOTS_PATH_RE = re.compile(r"^(?:Allow|Disallow):\s*(/\S*)", re.IGNORECASE | re.MULTILINE)
 SITEMAP_LOC_RE = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.IGNORECASE)
@@ -273,6 +274,37 @@ def map_http_surface(
                     "rationale": cand["rationale"],
                     "reachable": probe.status_code is not None and probe.status_code < 400,
                     "content_analysis": content,
+                }
+            )
+            if probe.status_code is not None and probe.status_code < 400:
+                normalized = probe_url.rstrip("/")
+                if normalized not in seen:
+                    seen.add(normalized)
+                    discovered.append(normalized)
+
+        for admin_path in ADMIN_PROBE_PATHS:
+            probe_url = urllib.parse.urljoin(base.rstrip("/") + "/", admin_path.lstrip("/"))
+            if probe_url.rstrip("/").lower() in seen:
+                continue
+            probe = transport.follow_redirects(probe_url, "GET", profile="browser", host=host)
+            probe_title = extract_title(probe.body)
+            content = analyze_page_content(
+                probe_url,
+                headers=probe.headers,
+                body=probe.body,
+                title=probe_title,
+            )
+            semantic_probes.append(
+                {
+                    "url": probe_url,
+                    "token": admin_path.strip("/").replace("/", "_"),
+                    "status_code": probe.status_code,
+                    "title": probe_title,
+                    "score": score_path(probe_url),
+                    "rationale": f"Admin panel probe for {admin_path} on detected default stack.",
+                    "reachable": probe.status_code is not None and probe.status_code < 400,
+                    "content_analysis": content,
+                    "admin_probe": True,
                 }
             )
             if probe.status_code is not None and probe.status_code < 400:
@@ -555,6 +587,54 @@ class HttpSurfaceAdapter:
                         "capability": "http_surface_map",
                         "discovered_from": surface.get("target"),
                         "relevance_score": link_score,
+                    },
+                }
+            )
+
+        for page in surface.get("content_pages") or []:
+            url = str(page.get("url") or "")
+            conclusions = list(page.get("conclusions") or [])
+            if not url or not conclusions:
+                continue
+            page_type = str(page.get("page_type") or "html")
+            page_evidence = [
+                f"page_type={page_type}",
+                f"url={url}",
+            ]
+            if page.get("php_version"):
+                page_evidence.append(f"php_version={page['php_version']}")
+            for conclusion in conclusions:
+                page_evidence.append(f"conclusion={conclusion}")
+            if page.get("text_preview"):
+                page_evidence.append(f"view_source_preview={page['text_preview'][:300]}")
+            confidence = 0.82
+            if page_type == "phpinfo":
+                confidence = 0.95
+            elif page_type == "phpmyadmin":
+                confidence = 0.93
+            elif any("resource exhaustion" in c.lower() for c in conclusions):
+                confidence = 0.88
+            findings.append(
+                {
+                    "hypothesis": (
+                        f"Content analysis ({page_type}): "
+                        f"{'; '.join(conclusions[:3])}"
+                    ),
+                    "path": url,
+                    "provenance": "http_surface:content_intel",
+                    "status": "hypothesis",
+                    "confidence": confidence,
+                    "evidence": page_evidence,
+                    "asset_type": "web_endpoint",
+                    "metadata": {
+                        "capability": "http_surface_map",
+                        "content_analysis": True,
+                        "page_type": page_type,
+                        "conclusions": conclusions,
+                        "php_version": page.get("php_version"),
+                        "mysql_signals": page.get("mysql_signals"),
+                        "form_count": page.get("form_count"),
+                        "discovered_from": surface.get("target"),
                     },
                 }
             )

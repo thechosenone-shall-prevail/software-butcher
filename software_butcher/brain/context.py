@@ -51,6 +51,13 @@ def build_brain_context(
         extra = ""
         if meta.get("page_summary"):
             extra += f" summary={str(meta['page_summary'])[:80]}"
+        if meta.get("content_analysis"):
+            page_type = meta.get("page_type") or "page"
+            conclusions = meta.get("conclusions") or []
+            if conclusions:
+                extra += f" [content:{page_type}] {conclusions[0][:100]}"
+            elif meta.get("php_version"):
+                extra += f" [PHP {meta['php_version']}]"
         if meta.get("stack_landing", {}).get("detected"):
             extra += " [XAMPP/default stack landing]"
         if meta.get("infrastructure", {}).get("conclusions"):

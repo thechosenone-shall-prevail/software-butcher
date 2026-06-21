@@ -209,8 +209,8 @@ def test_surface_map_marks_recon_complete_when_redirect_changes_final_url():
 @patch("software_butcher.shelves.web.http_surface._fetch_well_known_urls", return_value=[])
 @patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.follow_redirects")
 @patch("software_butcher.shelves.web.http_surface.SmartHttpTransport.probe_cache_behavior", return_value={})
-def test_xampp_landing_does_not_probe_hardcoded_admin_paths(mock_cache, mock_follow, _mock_well_known, _mock_browser):
-    """Admin panels must come from organic discovery, not a fixed path list."""
+def test_xampp_landing_probes_generic_admin_paths_when_stack_detected(mock_cache, mock_follow, _mock_well_known, _mock_browser):
+    """When XAMPP stack is detected, probe generic admin panels (phpMyAdmin, phpinfo)."""
     _mock_browser.return_value = MagicMock(
         success=False, final_url="", title="", redirect_chain=[], discovered_urls=[], error="disabled",
     )
@@ -231,9 +231,8 @@ def test_xampp_landing_does_not_probe_hardcoded_admin_paths(mock_cache, mock_fol
     assert surface["stack_landing"]["detected"] is True
 
     probed_urls = [call.args[0] for call in mock_follow.call_args_list]
-    assert not any("/phpmyadmin" in u for u in probed_urls)
-    assert not any("/dashboard/phpinfo.php" in u for u in probed_urls)
+    assert any("/phpmyadmin" in u for u in probed_urls)
+    assert any("/dashboard/phpinfo.php" in u for u in probed_urls)
 
-    semantic_urls = [p["url"] for p in surface.get("semantic_probes") or []]
-    assert not any("/phpmyadmin" in u for u in semantic_urls)
-    assert not any("/dashboard/phpinfo.php" in u for u in semantic_urls)
+    admin_probes = [p for p in surface.get("semantic_probes") or [] if p.get("admin_probe")]
+    assert len(admin_probes) == 2
